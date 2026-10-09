@@ -1,0 +1,23 @@
+# Secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+
+# Python
+__pycache__/
+.venv/
+venv/
+
+# Node
+node_modules/
+**/node_modules/
+client/dist/
+
+# Local trained models and uploaded data
+backend/models/
+uploads/
+backend/cleaned/
+backend/uploads/
+backend/models/
