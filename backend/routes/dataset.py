@@ -3664,7 +3664,7 @@ def ask_gemini(question, df):
             contents=prompt,
             config={
               
-                "max_output_tokens": 1200,
+                "max_output_tokens": 12000,
                 "temperature": 0.2
             }
         )
