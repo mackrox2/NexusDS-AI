@@ -64,6 +64,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 UPLOAD_DIR = BASE_DIR / "uploads"
 CLEANED_DIR = BASE_DIR / "cleaned"
+CACHE_DIR = BASE_DIR / "cache"
 
 UPLOAD_DIR.mkdir(
     parents=True,
@@ -71,6 +72,11 @@ UPLOAD_DIR.mkdir(
 )
 
 CLEANED_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+CACHE_DIR.mkdir(
     parents=True,
     exist_ok=True
 )
@@ -526,7 +532,9 @@ def _gridfs_cached_path(document, id_field, name, directory):
         return None
 
     safe_name = Path(str(name or "dataset.bin")).name
-    directory = Path(directory).resolve()
+    # GridFS downloads are only temporary working copies. Keep them separate
+    # from uploads/cleaned so clearing cache can never delete source datasets.
+    directory = CACHE_DIR.resolve()
     directory.mkdir(parents=True, exist_ok=True)
     path = (directory / safe_name).resolve()
 
@@ -2239,6 +2247,84 @@ def delete_dataset(
         "deletedReportFiles": deleted_report_files,
         "fileDeleteErrors": file_delete_errors
     })
+
+
+# =========================================================
+# STORAGE STATUS + TEMPORARY CACHE
+# =========================================================
+
+@router.get("/storage-stats")
+def get_storage_stats(current_user=Depends(get_current_user)):
+    """Return user-scoped dataset storage and temporary cache metrics."""
+    owner_id = str(current_user["_id"])
+    dataset_count = datasets_collection.count_documents({"ownerId": owner_id})
+
+    # GridFS file metadata includes ownerId on files saved by this router.
+    gridfs_files = db["dataset_files.files"]
+    owned_file_docs = list(gridfs_files.find({"metadata.ownerId": owner_id}, {"length": 1}))
+    user_files_bytes = sum(int(item.get("length", 0) or 0) for item in owned_file_docs)
+
+    cache_bytes = 0
+    cache_files_count = 0
+    try:
+        for item in CACHE_DIR.rglob("*"):
+            if item.is_file():
+                cache_files_count += 1
+                try:
+                    cache_bytes += item.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+    try:
+        server_disk_free_bytes = int(shutil.disk_usage(BASE_DIR).free)
+    except OSError:
+        server_disk_free_bytes = None
+
+    return {
+        "success": True,
+        "datasetCount": dataset_count,
+        "userFilesBytes": user_files_bytes,
+        "cacheBytes": cache_bytes,
+        "cacheFilesCount": cache_files_count,
+        "serverDiskFreeBytes": server_disk_free_bytes,
+        "storageBackend": "MongoDB Atlas GridFS",
+    }
+
+
+@router.post("/clear-cache")
+def clear_temporary_cache(current_user=Depends(get_current_user)):
+    """Clear only disposable GridFS working copies; never delete saved files."""
+    deleted_files = 0
+    freed_bytes = 0
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    for item in CACHE_DIR.rglob("*"):
+        if not item.is_file():
+            continue
+        try:
+            size = item.stat().st_size
+            item.unlink()
+            deleted_files += 1
+            freed_bytes += size
+        except OSError as error:
+            print("CACHE CLEANUP WARNING:", str(item), repr(error))
+
+    # Remove empty subdirectories without touching the cache root.
+    for item in sorted(CACHE_DIR.rglob("*"), key=lambda value: len(value.parts), reverse=True):
+        if item.is_dir():
+            try:
+                item.rmdir()
+            except OSError:
+                pass
+
+    return {
+        "success": True,
+        "deletedFiles": deleted_files,
+        "freedBytes": freed_bytes,
+        "message": "Temporary cache cleared. Persistent GridFS datasets were not deleted.",
+    }
 
 
 # =========================================================
