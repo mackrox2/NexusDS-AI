@@ -3663,9 +3663,7 @@ def ask_gemini(question, df):
             model=GEMINI_MODEL,
             contents=prompt,
             config={
-                "thinking_config": {
-                    "thinking_level": "minimal"
-                },
+              
                 "max_output_tokens": 350,
                 "temperature": 0.2
             }
@@ -3865,7 +3863,7 @@ DETERMINISTIC NEXT STEP:
                 model=GEMINI_MODEL,
                 contents=prompt,
                 config={
-                    "thinking_config": {"thinking_level": "minimal"},
+                 
                     "max_output_tokens": 500,
                     "temperature": 0.2
                 }

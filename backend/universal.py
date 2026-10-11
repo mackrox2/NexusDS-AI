@@ -256,7 +256,7 @@ structured information. If extraction is genuinely impossible, return [].
             model=GEMINI_MODEL,
             contents=contents,
             config={
-                "thinking_config": {"thinking_level": "minimal"},
+               
                 "response_mime_type": "application/json",
                 "max_output_tokens": 12000,
                 "temperature": 0.0,
