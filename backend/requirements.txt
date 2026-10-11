@@ -47,3 +47,4 @@ bcrypt
 PyJWT
 email-validator
 reportlab
+requests

@@ -11,7 +11,8 @@ import os
 import secrets
 import smtplib
 import ssl
-
+import requests
+import html
 import bcrypt
 import jwt
 from dotenv import load_dotenv
@@ -192,14 +193,55 @@ def issue_otp(document_id, email, name, existing_document=None):
         },
     )
 
+def send_verification_email(email: str, name: str, otp: str):
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
+
+    if not api_key:
+        raise RuntimeError("RESEND_API_KEY is missing in Render Environment.")
+
+    if not sender:
+        raise RuntimeError(
+            "RESEND_FROM_EMAIL is missing. Set a verified sender in Resend."
+        )
+
+    safe_name = html.escape(name)
+    safe_app_name = html.escape(APP_NAME)
+
+    payload = {
+        "from": f"{safe_app_name} <{sender}>",
+        "to": [email],
+        "subject": f"{APP_NAME} - Email verification code",
+        "html": f"""
+            <div style="font-family:Arial,sans-serif;padding:24px">
+                <h2>{safe_app_name}</h2>
+                <p>Hello {safe_name},</p>
+                <p>Your email verification code is:</p>
+                <h1 style="letter-spacing:8px">{otp}</h1>
+                <p>This code expires in {OTP_EXPIRE_MINUTES} minutes.</p>
+                <p>If you did not request this, ignore this email.</p>
+            </div>
+        """,
+    }
+
     try:
-        send_verification_email(email, name, otp)
-    except Exception:
-        # Do not leave a newly-created account in a misleading pending state
-        # when the email provider is unavailable.
-        if existing_document is None:
-            users_collection.delete_one({"_id": document_id})
-        raise
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+    except requests.RequestException as error:
+        raise RuntimeError(f"Resend connection failed: {error}") from error
+
+    if not response.ok:
+        raise RuntimeError(
+            f"Resend API returned {response.status_code}: {response.text}"
+        )
+
 
 
 @router.post("/register")
