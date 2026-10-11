@@ -1,4 +1,5 @@
 import os
+import gridfs
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -62,7 +63,8 @@ client = MongoClient(
 
 db = client["NexusDSAI"]
 
-
+# Persistent dataset file storage in MongoDB Atlas
+fs = gridfs.GridFSBucket(db, bucket_name="dataset_files")
 # =====================================================
 # COLLECTIONS
 # =====================================================

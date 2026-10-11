@@ -16,6 +16,7 @@ import time
 from google import genai
 
 from database.mongodb import datasets_collection, db
+import gridfs
 from auth import get_current_user
 from universal import (
     supported_extension,
@@ -49,6 +50,10 @@ router = APIRouter(
     prefix="/api/dataset",
     tags=["Dataset"]
 )
+
+# Persistent file storage in the existing MongoDB Atlas database.
+# GridFS stores file bytes in chunks, unlike local Render disk.
+fs = gridfs.GridFSBucket(db, bucket_name="dataset_files")
 
 
 # =========================================================
@@ -514,74 +519,147 @@ def get_document(dataset_id, current_user=None):
     return document
 
 
-def get_file_path(document):
+def _gridfs_cached_path(document, id_field, name, directory):
+    """Return a local working copy of a persistent GridFS file."""
+    file_id = document.get(id_field)
+    if not file_id:
+        return None
 
-    stored_name = document.get("storedName")
+    safe_name = Path(str(name or "dataset.bin")).name
+    directory = Path(directory).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = (directory / safe_name).resolve()
 
-    if stored_name:
-        path = UPLOAD_DIR / stored_name
-    else:
-        raw_path = document.get("filePath")
+    # Guard against path traversal from stored metadata.
+    if directory not in path.parents:
+        raise HTTPException(status_code=400, detail="Invalid stored filename.")
 
-        if not raw_path:
+    if not path.exists():
+        try:
+            with fs.open_download_stream(ObjectId(str(file_id))) as stream:
+                data = stream.read()
+            path.write_bytes(data)
+        except Exception as error:
             raise HTTPException(
                 status_code=404,
-                detail="Dataset file path is missing."
+                detail=f"Persistent dataset file could not be loaded: {error}"
             )
+    return path
 
+
+def _save_gridfs_file(path, filename, owner_id=None, dataset_id=None, role=None):
+    """Persist a local working file to GridFS and return its file ID string."""
+    metadata = {
+        "ownerId": str(owner_id) if owner_id is not None else None,
+        "datasetId": str(dataset_id) if dataset_id is not None else None,
+        "role": role or "dataset",
+    }
+    with open(path, "rb") as source:
+        with fs.open_upload_stream(
+            Path(filename).name,
+            metadata=metadata
+        ) as target:
+            shutil.copyfileobj(source, target)
+            return str(target._id)
+
+
+def _delete_gridfs_file(file_id):
+    if not file_id:
+        return False
+    try:
+        fs.delete(ObjectId(str(file_id)))
+        return True
+    except Exception as error:
+        # Missing files should not prevent the dataset record being removed.
+        print("GRIDFS DELETE WARNING:", repr(error))
+        return False
+
+
+def get_file_path(document):
+    """Get original upload from GridFS, falling back to legacy local files."""
+    persistent_path = _gridfs_cached_path(
+        document,
+        "gridfsFileId",
+        document.get("storedName") or document.get("fileName"),
+        UPLOAD_DIR
+    )
+    if persistent_path is not None:
+        return persistent_path
+
+    stored_name = document.get("storedName")
+    if stored_name:
+        path = UPLOAD_DIR / Path(str(stored_name)).name
+    else:
+        raw_path = document.get("filePath")
+        if not raw_path:
+            raise HTTPException(status_code=404, detail="Dataset file path is missing.")
         path = Path(raw_path)
-
         if not path.is_absolute():
             path = BASE_DIR / path
 
     path = path.resolve()
-
     if not path.exists():
         raise HTTPException(
             status_code=404,
-            detail="Dataset file was not found inside backend/uploads."
+            detail="Dataset file was not found in persistent storage or legacy uploads."
         )
-
     return path
 
 
 def get_analysis_file_path(document):
-    """
-    Return the normalized XLSX used by analysis/ML/AI when a universal
-    conversion was performed. Fall back to the original upload for legacy
-    datasets.
-    """
+    """Get the normalized analysis file from GridFS or legacy local storage."""
+    persistent_path = _gridfs_cached_path(
+        document,
+        "analysisGridFsId",
+        document.get("analysisStoredName") or "analysis.xlsx",
+        UPLOAD_DIR
+    )
+    if persistent_path is not None:
+        return persistent_path
+
     stored_name = document.get("analysisStoredName")
     if stored_name:
-        path = (UPLOAD_DIR / stored_name).resolve()
+        path = (UPLOAD_DIR / Path(str(stored_name)).name).resolve()
         if path.exists() and UPLOAD_DIR.resolve() in path.parents:
             return path
-
     return get_file_path(document)
 
 
+def get_generated_file_path(document, id_field, name_field, default_name, directory=UPLOAD_DIR):
+    """Get a generated/converted file from GridFS, with legacy local fallback."""
+    filename = document.get(name_field) or default_name
+    persistent_path = _gridfs_cached_path(
+        document,
+        id_field,
+        document.get(name_field + "StoredName") or filename,
+        directory
+    )
+    if persistent_path is not None:
+        return persistent_path
+
+    stored_name_fields = {
+        "convertedExcelGridFsId": "convertedExcelStoredName",
+        "convertedCsvGridFsId": "convertedCsvStoredName",
+    }
+    stored_name = document.get(stored_name_fields.get(id_field, name_field + "StoredName"))
+    if stored_name:
+        path = (Path(directory) / Path(str(stored_name)).name).resolve()
+        if Path(directory).resolve() in path.parents and path.exists():
+            return path
+    raise HTTPException(status_code=404, detail=f"Stored file '{filename}' was not found.")
+
+
 def load_dataset(dataset_id, current_user=None):
-
     document = get_document(dataset_id, current_user)
-
     file_path = get_analysis_file_path(document)
-
     try:
         df = read_dataset(file_path)
     except HTTPException:
         raise
     except Exception as error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unable to read dataset: {error}"
-        )
-
+        raise HTTPException(status_code=400, detail=f"Unable to read dataset: {error}")
     if df.empty:
-        raise HTTPException(
-            status_code=400,
-            detail="Dataset is empty."
-        )
-
+        raise HTTPException(status_code=400, detail="Dataset is empty.")
     return document, file_path, df
 
 
@@ -1589,6 +1667,21 @@ async def upload_dataset(
         except OSError:
             pass
 
+        # Save original + normalized outputs in persistent MongoDB GridFS.
+        # Local files are only working copies/cache; GridFS is the source of truth.
+        original_gridfs_id = _save_gridfs_file(
+            original_path, original_stored_name,
+            owner_id=current_user["_id"], role="original"
+        )
+        analysis_gridfs_id = _save_gridfs_file(
+            final_analysis_path, analysis_stored_name,
+            owner_id=current_user["_id"], role="analysis"
+        )
+        csv_gridfs_id = _save_gridfs_file(
+            final_csv_path, csv_stored_name,
+            owner_id=current_user["_id"], role="converted_csv"
+        )
+
         df = conversion["dataframe"]
         now = datetime.utcnow()
 
@@ -1597,6 +1690,7 @@ async def upload_dataset(
             "ownerEmail": current_user.get("email", ""),
             "fileName": original_name,
             "storedName": original_stored_name,
+            "gridfsFileId": original_gridfs_id,
             "filePath": str(Path("uploads") / original_stored_name),
             "fileType": dataset.content_type or "application/octet-stream",
             "uploadedAt": now,
@@ -1609,6 +1703,7 @@ async def upload_dataset(
             "extractionMethod": conversion["extractionMethod"],
             "converted": True,
             "analysisStoredName": analysis_stored_name,
+            "analysisGridFsId": analysis_gridfs_id,
             "analysisFilePath": str(Path("uploads") / analysis_stored_name),
             "convertedExcelName": (
                 f"{Path(original_name).stem}_NexusDS_Converted.xlsx"
@@ -1617,7 +1712,9 @@ async def upload_dataset(
                 f"{Path(original_name).stem}_NexusDS_Converted.csv"
             ),
             "convertedExcelStoredName": analysis_stored_name,
+            "convertedExcelGridFsId": analysis_gridfs_id,
             "convertedCsvStoredName": csv_stored_name,
+            "convertedCsvGridFsId": csv_gridfs_id,
         }
 
         result = datasets_collection.insert_one(document)
@@ -1704,12 +1801,11 @@ def download_converted_excel(
             "No converted Excel file is available for this dataset."
         )
 
-    path = (UPLOAD_DIR / Path(stored_name).name).resolve()
-    if UPLOAD_DIR.resolve() not in path.parents or not path.exists():
-        raise HTTPException(
-            404,
-            "Converted Excel file was not found."
-        )
+    path = get_generated_file_path(
+        document, "convertedExcelGridFsId", "convertedExcelName",
+        f"{Path(document.get('fileName', 'dataset')).stem}_NexusDS_Converted.xlsx",
+        UPLOAD_DIR
+    )
 
     return FileResponse(
         path=str(path),
@@ -1743,12 +1839,11 @@ def download_converted_csv(
             "No converted CSV file is available for this dataset."
         )
 
-    path = (UPLOAD_DIR / Path(stored_name).name).resolve()
-    if UPLOAD_DIR.resolve() not in path.parents or not path.exists():
-        raise HTTPException(
-            404,
-            "Converted CSV file was not found."
-        )
+    path = get_generated_file_path(
+        document, "convertedCsvGridFsId", "convertedCsvName",
+        f"{Path(document.get('fileName', 'dataset')).stem}_NexusDS_Converted.csv",
+        UPLOAD_DIR
+    )
 
     return FileResponse(
         path=str(path),
@@ -2097,6 +2192,20 @@ def delete_dataset(
     deleted_reports = int(
         report_delete_result.deleted_count
     )
+
+    # -----------------------------------------------------
+    # DELETE PERSISTENT GRIDFS FILES
+    # -----------------------------------------------------
+    for id_field in (
+        "gridfsFileId",
+        "analysisGridFsId",
+        "convertedExcelGridFsId",
+        "convertedCsvGridFsId",
+        "cleanedGridFsId",
+    ):
+        file_id = document.get(id_field)
+        if file_id:
+            _delete_gridfs_file(file_id)
 
     # -----------------------------------------------------
     # DELETE DATASET DB RECORD
@@ -3328,6 +3437,19 @@ def clean_dataset(
             new_df
         )
     )
+    cleaned_gridfs_id = _save_gridfs_file(
+        cleaned_path,
+        cleaned_path.name,
+        owner_id=current_user["_id"],
+        dataset_id=document["_id"],
+        role="cleaned"
+    )
+
+    # Remove the previous persistent cleaned version only after the new one
+    # has been stored successfully.
+    previous_cleaned_id = document.get("cleanedGridFsId")
+    if previous_cleaned_id:
+        _delete_gridfs_file(previous_cleaned_id)
 
     datasets_collection.update_one(
 
@@ -3341,6 +3463,9 @@ def clean_dataset(
 
                 "cleanedFileName":
                     cleaned_path.name,
+
+                "cleanedGridFsId":
+                    cleaned_gridfs_id,
 
                 "cleanedFilePath":
                     str(
@@ -3426,17 +3551,16 @@ def download_cleaned_dataset(
             )
         )
 
-    path = (
+    path = _gridfs_cached_path(
+        document,
+        "cleanedGridFsId",
+        filename,
         CLEANED_DIR
-        / filename
-    ).resolve()
-
-    if not path.exists():
-
-        raise HTTPException(
-            404,
-            "Cleaned dataset file not found."
-        )
+    )
+    if path is None:
+        path = (CLEANED_DIR / Path(filename).name).resolve()
+        if CLEANED_DIR.resolve() not in path.parents or not path.exists():
+            raise HTTPException(404, "Cleaned dataset file not found.")
 
     media_type = (
 
