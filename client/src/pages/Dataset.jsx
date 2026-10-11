@@ -10,10 +10,9 @@ import {
   FaChartLine,
 } from "react-icons/fa";
 
-import { API_BASE_URL }
- from "../api/config";
+const API_URL =
+  import.meta.env.VITE_API_URL || "https://nexusds-ai.onrender.com";
 
-const API_URL = API_BASE_URL;
 const SUPPORTED_EXTENSIONS = [
   "csv",
   "xlsx",

@@ -11,8 +11,8 @@ import {
   FaArrowRight,
 } from "react-icons/fa";
 import Navbar from "../Navbar/Navbar";
-
-const API_URL = "http://127.0.0.1:8000";
+import { API_BASE_URL } from "../../api/config.js";
+const API_URL = API_BASE_URL;
 
 function Dashboard() {
   const navigate = useNavigate();
