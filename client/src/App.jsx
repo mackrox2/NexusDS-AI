@@ -134,7 +134,14 @@ function App() {
             </Protected>
           }
         />
-
+<Route
+  path="/agents/prediction-studio"
+  element={
+    <Protected>
+      <PredictionStudio />
+    </Protected>
+  }
+/>
         <Route
           path="/explainability"
           element={
