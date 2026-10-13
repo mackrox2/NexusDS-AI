@@ -8,6 +8,7 @@ import {
 import ProtectedRoute from "./components/ProtectedRoute";
 import ErrorBoundary from "./components/ErrorBoundary";
 import NotFound from "./pages/NotFound";
+import ForgotPassword from "./pages/ForgotPassword";
 
 import Home from "./pages/Home";
 import Login from "./pages/Login";
@@ -24,20 +25,6 @@ import MLTraining from "./pages/MLTraining";
 import PredictionStudio from "./pages/PredictionStudio";
 import Explainability from "./pages/Explainability";
 
-/*
-  Central application routing.
-
-  Public:
-    /               Home
-    /login          Login
-    /signup         Signup
-
-  Protected:
-    All workspace/application pages require authentication.
-
-  Legacy:
-    /data-cleaning redirects to the current agent route.
-*/
 
 function Protected({ children }) {
   return <ProtectedRoute>{children}</ProtectedRoute>;
@@ -54,6 +41,8 @@ function App() {
         <Route path="/" element={<Home />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+
 
         {/* =========================
             CORE WORKSPACE
