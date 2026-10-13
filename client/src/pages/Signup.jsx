@@ -23,6 +23,8 @@ import {
 } from "react-icons/fa";
 
 import API from "../api/auth";
+import { createUserWithEmailAndPassword, sendEmailVerification, updateProfile } from "firebase/auth";
+import { auth } from "../firebase";
 
 function Signup() {
 
@@ -74,22 +76,21 @@ function Signup() {
 
     try {
 
-      await API.post("/register", {
+      const name = formData.name.trim();
+      const email = formData.email.trim().toLowerCase();
 
-        name: formData.name.trim(),
-
-        email: formData.email.trim().toLowerCase(),
-
-        password: formData.password,
-
+      const credential = await createUserWithEmailAndPassword(auth, email, formData.password);
+      await updateProfile(credential.user, { displayName: name });
+      await sendEmailVerification(credential.user, {
+        url: `${window.location.origin}/verify-email`,
+        handleCodeInApp: false,
       });
 
+      await API.post("/register", { name, email, password: formData.password });
+
       navigate("/login", {
-
         replace: true,
-
-        state: { message: "Account created successfully. You can now sign in." },
-
+        state: { message: "Verification email sent. Open the link in your inbox, then sign in." },
       });
 
     } catch (error) {

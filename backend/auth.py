@@ -428,9 +428,11 @@ def send_verification_link(email: str, name: str, token: str):
 
 @router.post("/register")
 def register(data: RegisterRequest):
+    """Create a pending account. Firebase sends and verifies the email link."""
     name = data.name.strip()
     email = str(data.email).strip().lower()
     password = data.password
+
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Please enter a valid name.")
     if len(password) < 6:
@@ -441,32 +443,61 @@ def register(data: RegisterRequest):
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
     password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    raw_token = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
     now = utc_now()
-    document_fields = {
-        "name": name,
-        "email": email,
-        "passwordHash": password_hash,
-        "emailVerified": False,
-        "emailVerificationLink.tokenHash": token_hash,
-        "emailVerificationLink.expiresAt": now + timedelta(minutes=30),
-        "emailVerificationLink.createdAt": now,
-    }
     if existing:
-        user_id = existing["_id"]
-        users_collection.update_one({"_id": user_id}, {"$set": document_fields, "$unset": {"emailVerification": ""}})
+        users_collection.update_one(
+            {"_id": existing["_id"]},
+            {"$set": {"name": name, "passwordHash": password_hash, "emailVerified": False,
+                      "firebaseVerificationPending": True, "updatedAt": now},
+             "$unset": {"emailVerificationLink": "", "emailVerification": ""}}
+        )
     else:
-        document = {"name": name, "email": email, "passwordHash": password_hash, "emailVerified": False,
-                    "emailVerificationLink": {"tokenHash": token_hash, "expiresAt": now + timedelta(minutes=30), "createdAt": now},
-                    "createdAt": now}
-        user_id = users_collection.insert_one(document).inserted_id
+        users_collection.insert_one({
+            "name": name, "email": email, "passwordHash": password_hash,
+            "emailVerified": False, "firebaseVerificationPending": True, "createdAt": now
+        })
+    return {"success": True, "verificationRequired": True,
+            "message": "Account created. Check your email and verify it before signing in."}
+
+
+class FirebaseConfirmRequest(BaseModel):
+    idToken: str
+
+
+@router.post("/firebase-confirm")
+def firebase_confirm(data: FirebaseConfirmRequest):
+    """Verify Firebase ID token server-side before marking the Mongo account verified."""
+    api_key = os.getenv("FIREBASE_WEB_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Firebase is not configured on the backend.")
     try:
-        send_verification_link(email, name, raw_token)
-    except Exception as error:
-        users_collection.update_one({"_id": user_id}, {"$unset": {"emailVerificationLink": ""}})
-        raise HTTPException(status_code=503, detail=f"Unable to send verification email: {error}")
-    return {"success": True, "verificationRequired": True, "message": "Account created. Check your email and click the verification link before signing in."}
+        response = requests.post(
+            f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={api_key}",
+            json={"idToken": data.idToken},
+            timeout=15,
+        )
+        if not response.ok:
+            raise ValueError("Firebase token rejected")
+        firebase_user = response.json().get("users", [])[0]
+        if firebase_user.get("emailVerified") is not True:
+            raise HTTPException(status_code=403, detail="Please verify your email using the link first.")
+        email = str(firebase_user.get("email", "")).strip().lower()
+        if not email:
+            raise ValueError("No email in Firebase token")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Could not verify your Firebase account.")
+
+    user = users_collection.find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found. Please sign up again.")
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"emailVerified": True, "emailVerifiedAt": utc_now()},
+         "$unset": {"firebaseVerificationPending": ""}}
+    )
+    return {"success": True, "message": "Email verification confirmed."}
 
 
 @router.post("/verify-email-link")
