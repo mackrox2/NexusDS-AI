@@ -19,6 +19,7 @@ import json
 import math
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ except Exception:
     Document = None
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _PDF_EXTENSIONS = {".pdf"}
@@ -134,11 +135,39 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # Remove accidental fully blank strings.
     result = result.replace(r"^\s*$", np.nan, regex=True)
 
-    # IMPORTANT:
-    # Do not automatically convert OCR/extracted strings into dates or numbers.
-    # For handwritten/scanned sources, values such as "01-08-25" must remain
-    # exactly that value instead of becoming a pandas Timestamp / Excel date.
-    # Native CSV/Excel readers already preserve their native numeric types.
+    # Convert obvious numeric/date values while preserving meaningful text.
+    for column in result.columns:
+        series = result[column]
+        non_null = series.dropna()
+        if non_null.empty:
+            continue
+
+        as_text = non_null.astype(str).str.strip()
+        numeric = pd.to_numeric(
+            as_text.str.replace(",", "", regex=False)
+            .str.replace("%", "", regex=False),
+            errors="coerce",
+        )
+
+        numeric_ratio = float(numeric.notna().mean())
+        if numeric_ratio >= 0.90:
+            result[column] = pd.to_numeric(
+                result[column].astype(str)
+                .str.replace(",", "", regex=False)
+                .str.replace("%", "", regex=False),
+                errors="coerce",
+            )
+            continue
+
+        parsed_dates = pd.to_datetime(
+            series,
+            errors="coerce",
+            format="mixed",
+        )
+        date_ratio = float(parsed_dates.notna().mean())
+        if date_ratio >= 0.90:
+            result[column] = parsed_dates
+
     return result.reset_index(drop=True)
 
 
@@ -208,6 +237,71 @@ def _extract_docx_text(file_path: Path) -> str:
     return "\n".join(lines)
 
 
+def _is_transient_gemini_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return any(
+        token in message
+        for token in (
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+            "unavailable",
+            "high demand",
+            "overloaded",
+            "resource exhausted",
+            "temporarily",
+        )
+    )
+
+
+def _gemini_generate(contents, config=None):
+    """
+    Central Gemini caller for this ingestion engine.
+
+    Existing extraction behavior is preserved. Transient provider failures
+    are retried and, when configured, a fallback model is attempted.
+    """
+    if _client is None:
+        raise RuntimeError(
+            "Gemini is required for image/scanned-PDF extraction. "
+            "Set GEMINI_API_KEY in backend/.env."
+        )
+
+    configured_model = GEMINI_MODEL or "gemini-2.5-flash"
+    fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
+
+    models = []
+    for model_name in (configured_model, fallback_model, "gemini-2.5-flash-lite"):
+        if model_name and model_name not in models:
+            models.append(model_name)
+
+    last_error = None
+
+    for model_name in models:
+        for attempt in range(3):
+            try:
+                return _client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config or {},
+                )
+            except Exception as error:
+                last_error = error
+
+                if not _is_transient_gemini_error(error):
+                    raise
+
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+
+    raise RuntimeError(
+        "Gemini is temporarily unavailable after retries and fallback. "
+        f"Last error: {last_error}"
+    )
+
+
 def _gemini_json_from_file(file_path: Path, instruction: str) -> list[dict]:
     if _client is None:
         raise RuntimeError(
@@ -252,11 +346,10 @@ structured information. If extraction is genuinely impossible, return [].
             prompt,
         ]
 
-        response = _client.models.generate_content(
-            model=GEMINI_MODEL,
+        response = _gemini_generate(
             contents=contents,
             config={
-               
+                "thinking_config": {"thinking_level": "minimal"},
                 "response_mime_type": "application/json",
                 "max_output_tokens": 12000,
                 "temperature": 0.0,
@@ -423,12 +516,7 @@ def write_outputs(
 ) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_base = re.sub(
-        r"[^A-Za-z0-9._-]+",
-        "_",
-        base_name,
-    ).strip("._")
-
+    safe_base = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name).strip("._")
     if not safe_base:
         safe_base = "NexusDS_Converted_Dataset"
 
@@ -437,114 +525,16 @@ def write_outputs(
 
     export_df = df.copy()
 
-    # Keep actual datetime columns valid in Excel, but give them a readable
-    # format so Excel never shows #### just because the column is narrow.
-    export_df.to_excel(
-        xlsx_path,
-        index=False,
-        engine="openpyxl",
-    )
+    # Excel handles timezone-naive timestamps more reliably.
+    for column in export_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(export_df[column]):
+            export_df[column] = export_df[column].dt.tz_localize(None)
 
-    export_df.to_csv(
-        csv_path,
-        index=False,
-        encoding="utf-8-sig",
-    )
-
-    # Professional, readable Excel formatting without changing the data.
-    from openpyxl import load_workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
-    from openpyxl.utils import get_column_letter
-
-    workbook = load_workbook(xlsx_path)
-    sheet = workbook.active
-
-    sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = sheet.dimensions
-    sheet.sheet_view.showGridLines = True
-
-    header_fill = PatternFill(
-        fill_type="solid",
-        fgColor="0F172A",
-    )
-
-    for cell in sheet[1]:
-        cell.font = Font(
-            bold=True,
-            color="FFFFFF",
-        )
-        cell.fill = header_fill
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-        )
-
-    # Make every value fully visible. Width is calculated from actual cell
-    # content instead of relying on Excel's default narrow columns.
-    for column_index, column_cells in enumerate(
-        sheet.iter_cols(
-            min_row=1,
-            max_row=sheet.max_row,
-            min_col=1,
-            max_col=sheet.max_column,
-        ),
-        start=1,
-    ):
-        max_length = 0
-
-        for cell in column_cells:
-            value = cell.value
-
-            if value is None:
-                display_value = ""
-            elif hasattr(value, "strftime") and not isinstance(value, str):
-                display_value = value.strftime("%d-%m-%y")
-                # Keep source dates readable instead of Excel serial/date width.
-                cell.number_format = "dd-mm-yy"
-            else:
-                display_value = str(value)
-
-            max_length = max(
-                max_length,
-                len(display_value),
-            )
-
-            cell.alignment = Alignment(
-                vertical="center",
-                wrap_text=False,
-            )
-
-        # Give text columns enough room while preventing extremely wide sheets.
-        header_value = str(sheet.cell(1, column_index).value or "")
-        max_length = max(max_length, len(header_value))
-
-        width = max(12, min(max_length + 3, 45))
-
-        # Common long-text/data columns get a little more room.
-        header_lower = header_value.lower()
-        if any(
-            keyword in header_lower
-            for keyword in (
-                "item",
-                "product",
-                "description",
-                "remarks",
-                "comment",
-                "name",
-                "address",
-            )
-        ):
-            width = max(width, 24)
-
-        sheet.column_dimensions[
-            get_column_letter(column_index)
-        ].width = width
-
-    sheet.row_dimensions[1].height = 24
-
-    workbook.save(xlsx_path)
+    export_df.to_excel(xlsx_path, index=False, engine="openpyxl")
+    export_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
     return xlsx_path, csv_path
+
 
 def convert_to_analysis_files(
     original_path: Path,
