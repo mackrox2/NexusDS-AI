@@ -40,7 +40,7 @@ except Exception:
     Document = None
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _PDF_EXTENSIONS = {".pdf"}
@@ -269,11 +269,11 @@ def _gemini_generate(contents, config=None):
             "Set GEMINI_API_KEY in backend/.env."
         )
 
-    configured_model = GEMINI_MODEL or "gemini-2.5-flash"
+    configured_model = GEMINI_MODEL or "gemini-3.8-flash"
     fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 
     models = []
-    for model_name in (configured_model, fallback_model, "gemini-2.5-flash-lite"):
+    for model_name in (configured_model, fallback_model, "gemini-3.8-flash-lite"):
         if model_name and model_name not in models:
             models.append(model_name)
 

@@ -32,7 +32,7 @@ from universal import (
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 
 gemini_client = None
 
@@ -3850,7 +3850,7 @@ def _gemini_generate(contents, config=None):
     if gemini_client is None:
         raise RuntimeError("Gemini client could not be initialized.")
 
-    configured = GEMINI_MODEL or "gemini-2.5-flash"
+    configured = GEMINI_MODEL or "gemini-3.8-flash"
     fallback = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 
     models = []
