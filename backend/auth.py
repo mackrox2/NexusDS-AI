@@ -130,7 +130,7 @@ def public_user(document):
 
         "email": document.get("email", ""),
 
-        "emailVerified": document.get("emailVerified") is True,
+        "emailVerified": document.get("emailVerified", False) is True,
 
     }
 
@@ -265,170 +265,48 @@ def issue_otp(document_id, email, name, existing_document=None):
         raise
 
 def send_verification_email(email: str, name: str, otp: str):
-
-    """Send OTP through Resend when configured; otherwise use Gmail SMTP."""
-
-    safe_name = html.escape(name)
-
+    """Send OTP using Gmail SMTP when configured; otherwise use Resend."""
+    safe_name = html.escape(str(name or "there"))
     safe_app_name = html.escape(APP_NAME)
-
     subject = f"{APP_NAME} - Email verification code"
+    html_body = f"""<div style="font-family:Arial,sans-serif;padding:24px;background:#f8fafc"><div style="max-width:560px;margin:auto;padding:28px;background:#fff;border-radius:16px;border:1px solid #e2e8f0"><h2 style="color:#0891b2">{safe_app_name}</h2><p>Hello {safe_name},</p><p>Your email verification code is:</p><div style="margin:24px 0;padding:18px;text-align:center;background:#ecfeff;border-radius:12px"><span style="font-size:34px;letter-spacing:10px;font-weight:800;color:#0891b2">{otp}</span></div><p>This code expires in {OTP_EXPIRE_MINUTES} minutes.</p><p>If you did not request this, you can safely ignore this email.</p><p>Regards,<br>{safe_app_name}</p></div></div>"""
 
-    html_body = f"""
-
-        <div style="font-family:Arial,sans-serif;padding:24px">
-
-            <h2>{safe_app_name}</h2>
-
-            <p>Hello {safe_name},</p>
-
-            <p>Your email verification code is:</p>
-
-            <h1 style="letter-spacing:8px">{otp}</h1>
-
-            <p>This code expires in {OTP_EXPIRE_MINUTES} minutes.</p>
-
-            <p>If you did not request this, ignore this email.</p>
-
-        </div>
-
-    """
-
-    api_key = os.getenv("RESEND_API_KEY", "").strip()
-
-    resend_sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
-
-    # Use Resend only when configured; incomplete Resend configuration is an error.
-
-    if api_key or resend_sender:
-
-        if not api_key:
-
-            raise RuntimeError("RESEND_API_KEY is missing in the deployment environment.")
-
-        if not resend_sender:
-
-            raise RuntimeError("RESEND_FROM_EMAIL is missing. Set a verified sender in Resend.")
-
-        payload = {
-
-            "from": f"{safe_app_name} <{resend_sender}>",
-
-            "to": [email],
-
-            "subject": subject,
-
-            "html": html_body,
-
-        }
-
+    # Gmail SMTP is preferred for production because it can send to arbitrary recipients.
+    if SMTP_USER and SMTP_PASSWORD and FROM_EMAIL:
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = FROM_EMAIL
+        message["To"] = email
+        message.set_content(f"Hello {name},\n\nYour {APP_NAME} email verification code is: {otp}\n\nThis code expires in {OTP_EXPIRE_MINUTES} minutes.\nIf you did not request this, you can safely ignore this email.\n")
+        message.add_alternative(html_body, subtype="html")
         try:
+            context = ssl.create_default_context()
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+                server.ehlo()
+                server.starttls(context=context)
+                server.ehlo()
+                server.login(SMTP_USER, SMTP_PASSWORD)
+                server.send_message(message)
+            return
+        except Exception as error:
+            raise RuntimeError(f"SMTP email delivery failed: {error}") from error
 
-            response = requests.post(
-
-                "https://api.resend.com/emails",
-
-                headers={
-
-                    "Authorization": f"Bearer {api_key}",
-
-                    "Content-Type": "application/json",
-
-                },
-
-                json=payload,
-
-                timeout=20,
-
-            )
-
+    if RESEND_API_KEY and RESEND_FROM_EMAIL:
+        payload = {"from": f"{safe_app_name} <{RESEND_FROM_EMAIL}>", "to": [email], "subject": subject, "html": html_body}
+        try:
+            response = requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"}, json=payload, timeout=20)
         except requests.RequestException as error:
-
             raise RuntimeError(f"Resend connection failed: {error}") from error
-
         if not response.ok:
-
-            raise RuntimeError(f"Resend API returned {response.status_code}: {response.text}")
-
+            raise RuntimeError(f"Resend API returned {response.status_code}: {response.text[:500]}")
         return
 
-    # Fallback to SMTP for deployments/local environments that already use Gmail.
-
-    if not SMTP_USER or not SMTP_PASSWORD or not FROM_EMAIL:
-
-        raise RuntimeError(
-
-            "Email is not configured. Set RESEND_API_KEY and RESEND_FROM_EMAIL, "
-
-            "or SMTP_USER, SMTP_PASSWORD and FROM_EMAIL."
-
-        )
-
-    message = EmailMessage()
-
-    message["Subject"] = subject
-
-    message["From"] = FROM_EMAIL
-
-    message["To"] = email
-
-    message.set_content(
-
-        f"Hello {name},\n\nYour {APP_NAME} verification code is: {otp}\n\n"
-
-        f"This code expires in {OTP_EXPIRE_MINUTES} minutes.\n"
-
-        "If you did not request this, you can safely ignore this email.\n"
-
-    )
-
-    message.add_alternative(html_body, subtype="html")
-
-    try:
-
-        context = ssl.create_default_context()
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-
-            server.ehlo()
-
-            server.starttls(context=context)
-
-            server.ehlo()
-
-            server.login(SMTP_USER, SMTP_PASSWORD)
-
-            server.send_message(message)
-
-    except Exception as error:
-
-        raise RuntimeError(f"SMTP email delivery failed: {error}") from error
-
-def send_verification_link(email: str, name: str, token: str):
-    """Send a one-time email verification link using the configured Resend sender."""
-    api_key = os.getenv("RESEND_API_KEY", "").strip()
-    sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
-    if not api_key or not sender:
-        raise RuntimeError("Email sender is not configured. Set RESEND_API_KEY and a verified RESEND_FROM_EMAIL.")
-    frontend_url = os.getenv("FRONTEND_URL", "https://nexusds-ai.pages.dev").strip().rstrip("/")
-    link = f"{frontend_url}/verify-email?token={token}"
-    safe_name = html.escape(name)
-    safe_app = html.escape(APP_NAME)
-    safe_link = html.escape(link, quote=True)
-    payload = {
-        "from": f"{safe_app} <{sender}>",
-        "to": [email],
-        "subject": f"{APP_NAME} - Verify your email",
-        "html": (f"<div><h2>{safe_app}</h2><p>Hello {safe_name},</p><p>Click below to verify your NexusDS AI account.</p><p><a href=\"{safe_link}\">Verify email address</a></p><p>This link expires in 30 minutes and can only be used once.</p><p>If you did not create this account, ignore this email.</p></div>"),
-    }
-    response = requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, timeout=20)
-    if response.status_code >= 400:
-        raise RuntimeError(f"Email provider rejected the message ({response.status_code}): {response.text[:300]}")
+    raise RuntimeError("Email is not configured. Set SMTP_USER, SMTP_PASSWORD and FROM_EMAIL for Gmail SMTP, or RESEND_API_KEY and RESEND_FROM_EMAIL for Resend.")
 
 
 @router.post("/register")
 def register(data: RegisterRequest):
-    """Create a pending account. Firebase sends and verifies the email link."""
+    """Create an account and send a 6-digit email verification OTP."""
     name = data.name.strip()
     email = str(data.email).strip().lower()
     password = data.password
@@ -436,90 +314,37 @@ def register(data: RegisterRequest):
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Please enter a valid name.")
     if len(password) < 6:
-        raise HTTPException(status_code=400, detail="Password must contain at least 6 characters.")
+        raise HTTPException(status_code=400, detail="Please enter a password with at least 6 characters.")
 
     existing = users_collection.find_one({"email": email})
-    if existing and existing.get("emailVerified") is True:
-        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    if existing:
+        if existing.get("emailVerified") is True:
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
+        verification = existing.get("emailVerification") or {}
+        last_sent = verification.get("lastSentAt")
+        if last_sent:
+            if last_sent.tzinfo is None:
+                last_sent = last_sent.replace(tzinfo=timezone.utc)
+            elapsed = (utc_now() - last_sent).total_seconds()
+            if elapsed < OTP_RESEND_SECONDS:
+                remaining = max(1, int(OTP_RESEND_SECONDS - elapsed))
+                raise HTTPException(status_code=429, detail=f"Please wait {remaining} seconds before requesting another code.")
+        password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        users_collection.update_one({"_id": existing["_id"]}, {"$set": {"name": name, "passwordHash": password_hash}})
+        try:
+            issue_otp(existing["_id"], email, name, existing_document=existing)
+        except Exception as error:
+            raise HTTPException(status_code=503, detail=f"Unable to send verification email: {error}")
+        return {"success": True, "verificationRequired": True, "message": "A new verification code has been sent to your email."}
 
     password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    now = utc_now()
-    if existing:
-        users_collection.update_one(
-            {"_id": existing["_id"]},
-            {"$set": {"name": name, "passwordHash": password_hash, "emailVerified": False,
-                      "firebaseVerificationPending": True, "updatedAt": now},
-             "$unset": {"emailVerificationLink": "", "emailVerification": ""}}
-        )
-    else:
-        users_collection.insert_one({
-            "name": name, "email": email, "passwordHash": password_hash,
-            "emailVerified": False, "firebaseVerificationPending": True, "createdAt": now
-        })
-    return {"success": True, "verificationRequired": True,
-            "message": "Account created. Check your email and verify it before signing in."}
-
-
-class FirebaseConfirmRequest(BaseModel):
-    idToken: str
-
-
-@router.post("/firebase-confirm")
-def firebase_confirm(data: FirebaseConfirmRequest):
-    """Verify Firebase ID token server-side before marking the Mongo account verified."""
-    api_key = os.getenv("FIREBASE_WEB_API_KEY", "").strip()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="Firebase is not configured on the backend.")
+    document = {"name": name, "email": email, "passwordHash": password_hash, "emailVerified": False, "emailVerification": {}, "createdAt": utc_now()}
+    result = users_collection.insert_one(document)
     try:
-        response = requests.post(
-            f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={api_key}",
-            json={"idToken": data.idToken},
-            timeout=15,
-        )
-        if not response.ok:
-            raise ValueError("Firebase token rejected")
-        firebase_user = response.json().get("users", [])[0]
-        if firebase_user.get("emailVerified") is not True:
-            raise HTTPException(status_code=403, detail="Please verify your email using the link first.")
-        email = str(firebase_user.get("email", "")).strip().lower()
-        if not email:
-            raise ValueError("No email in Firebase token")
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=401, detail="Could not verify your Firebase account.")
-
-    user = users_collection.find_one({"email": email})
-    if not user:
-        raise HTTPException(status_code=404, detail="Account not found. Please sign up again.")
-    users_collection.update_one(
-        {"_id": user["_id"]},
-        {"$set": {"emailVerified": True, "emailVerifiedAt": utc_now()},
-         "$unset": {"firebaseVerificationPending": ""}}
-    )
-    return {"success": True, "message": "Email verification confirmed."}
-
-
-@router.post("/verify-email-link")
-def verify_email_link(data: dict):
-    token = str(data.get("token", "")).strip()
-    if not token or len(token) > 512:
-        raise HTTPException(status_code=400, detail="Verification link is invalid or expired.")
-    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    user = users_collection.find_one({"emailVerificationLink.tokenHash": token_hash})
-    if not user:
-        raise HTTPException(status_code=400, detail="Verification link is invalid, expired, or already used.")
-    verification = user.get("emailVerificationLink") or {}
-    expires_at = verification.get("expiresAt")
-    if not expires_at:
-        raise HTTPException(status_code=400, detail="Verification link is invalid or expired.")
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if utc_now() >= expires_at:
-        users_collection.update_one({"_id": user["_id"]}, {"$unset": {"emailVerificationLink": ""}})
-        raise HTTPException(status_code=400, detail="Verification link has expired. Please register again to request a new link.")
-    users_collection.update_one({"_id": user["_id"]}, {"$set": {"emailVerified": True, "emailVerifiedAt": utc_now()}, "$unset": {"emailVerificationLink": "", "emailVerification": ""}})
-    return {"success": True, "message": "Email verified successfully. You can now sign in."}
+        issue_otp(result.inserted_id, email, name)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"Unable to send verification email: {error}")
+    return {"success": True, "verificationRequired": True, "message": "Account created. A verification code has been sent to your email."}
 
 
 @router.post("/verify-email")
@@ -826,20 +651,10 @@ def login(data: LoginRequest):
     user = users_collection.find_one({"email": email})
 
     if not user:
-
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    # Fail closed: accounts without an explicit verified status cannot log in.
-
     if user.get("emailVerified") is not True:
-
-        raise HTTPException(
-
-            status_code=403,
-
-            detail="Please verify your email address using the link sent to your email before logging in.",
-
-        )
+        raise HTTPException(status_code=403, detail="Please verify your email address with the 6-digit OTP before logging in.")
 
     password_hash = user.get("passwordHash") or user.get("password") or ""
 

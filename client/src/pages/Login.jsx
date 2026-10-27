@@ -25,8 +25,6 @@ import {
 } from "react-icons/fa";
 
 import API from "../api/auth";
-import { signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { auth } from "../firebase";
 
 
 
@@ -80,38 +78,17 @@ function Login() {
     setErrorMessage("");
     setIsSubmitting(true);
     const email = formData.email.trim().toLowerCase();
-
     try {
-      // First try Firebase to enforce verification for newly registered accounts.
-      try {
-        const credential = await signInWithEmailAndPassword(auth, email, formData.password);
-        await credential.user.reload();
-        if (!credential.user.emailVerified) {
-          await signOut(auth);
-          throw new Error("Please verify your email using the link sent to your inbox.");
-        }
-        const idToken = await credential.user.getIdToken(true);
-        await API.post("/firebase-confirm", { idToken });
-      } catch (firebaseError) {
-        // After the app's OTP password reset, MongoDB may have the new password
-        // while Firebase still has the old one. Backend login remains authoritative
-        // for already-verified accounts and preserves the existing OTP reset flow.
-        if (firebaseError?.message?.includes("Please verify your email")) throw firebaseError;
-      }
-
       const res = await API.post("/login", { email, password: formData.password });
+      if (!res.data?.token) throw new Error("Login succeeded but the server did not return a session token.");
       localStorage.setItem("token", res.data.token);
-      localStorage.setItem("user", JSON.stringify(res.data.user));
+      localStorage.setItem("user", JSON.stringify(res.data.user || {}));
       localStorage.removeItem("selectedDatasetId");
       localStorage.removeItem("selectedDatasetName");
+      localStorage.removeItem("datasetPath");
       navigate("/dashboard");
     } catch (error) {
-      setErrorMessage(
-        error.response?.data?.detail ||
-        error.response?.data?.message ||
-        error.message ||
-        "Unable to login. Please check your credentials and try again."
-      );
+      setErrorMessage(error.response?.data?.detail || error.response?.data?.message || error.message || "Unable to login. Please check your credentials and try again.");
     } finally {
       setIsSubmitting(false);
     }
