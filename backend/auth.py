@@ -428,7 +428,7 @@ def send_verification_link(email: str, name: str, token: str):
 
 @router.post("/register")
 def register(data: RegisterRequest):
-    """Create an account without signup email verification."""
+    """Create an unverified account and send a 6-digit email OTP."""
     name = data.name.strip()
     email = str(data.email).strip().lower()
     password = data.password
@@ -436,14 +436,14 @@ def register(data: RegisterRequest):
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="Please enter a valid name.")
     if len(password) < 6:
-        raise HTTPException(status_code=400, detail="Password must contain at least 6 characters.")
+        raise HTTPException(status_code=400, detail="Please enter a password with at least 6 characters.")
 
     existing = users_collection.find_one({"email": email})
     if existing and existing.get("emailVerified") is True:
-        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+        raise HTTPException(status_code=409, detail="An account with this email already exists. Please sign in.")
 
     password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    now = utc_now()
+
     if existing:
         user_id = existing["_id"]
         users_collection.update_one(
@@ -451,12 +451,14 @@ def register(data: RegisterRequest):
             {
                 "$set": {
                     "name": name,
-                    "email": email,
                     "passwordHash": password_hash,
-                    "emailVerified": True,
-                    "emailVerifiedAt": now,
+                    "emailVerified": False,
                 },
-                "$unset": {"emailVerification": "", "emailVerificationLink": ""},
+                "$unset": {
+                    "emailVerifiedAt": "",
+                    "emailVerification": "",
+                    "emailVerificationLink": "",
+                },
             },
         )
     else:
@@ -464,18 +466,23 @@ def register(data: RegisterRequest):
             "name": name,
             "email": email,
             "passwordHash": password_hash,
-            "emailVerified": True,
-            "emailVerifiedAt": now,
-            "createdAt": now,
+            "emailVerified": False,
+            "createdAt": utc_now(),
         }
         user_id = users_collection.insert_one(document).inserted_id
 
-    user = users_collection.find_one({"_id": user_id})
+    try:
+        issue_otp(user_id, email, name)
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Account is not verified because the verification email could not be sent: {error}",
+        )
+
     return {
         "success": True,
-        "verificationRequired": False,
-        "message": "Account created successfully. You can now sign in.",
-        "user": public_user(user),
+        "verificationRequired": True,
+        "message": "Account created. Enter the 6-digit code sent to your email to verify your account.",
     }
 
 
@@ -807,6 +814,12 @@ def login(data: LoginRequest):
     if not user:
 
         raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    if user.get("emailVerified") is not True:
+        raise HTTPException(
+            status_code=403,
+            detail="Please verify your email address with the 6-digit OTP before logging in.",
+        )
 
     password_hash = user.get("passwordHash") or user.get("password") or ""
 
