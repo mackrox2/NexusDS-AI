@@ -15,8 +15,7 @@ import uuid
 import time
 from google import genai
 
-from database.mongodb import datasets_collection, db
-import gridfs
+from database.mongodb import datasets_collection, db, fs
 from auth import get_current_user
 from universal import (
     supported_extension,
@@ -51,9 +50,7 @@ router = APIRouter(
     tags=["Dataset"]
 )
 
-# Persistent file storage in the existing MongoDB Atlas database.
-# GridFS stores file bytes in chunks, unlike local Render disk.
-fs = gridfs.GridFSBucket(db, bucket_name="dataset_files")
+# GridFS is shared from database.mongodb so every module uses one bucket.
 
 
 # =========================================================
@@ -526,32 +523,51 @@ def get_document(dataset_id, current_user=None):
 
 
 def _gridfs_cached_path(document, id_field, name, directory):
-    """Return a local working copy of a persistent GridFS file."""
+    """Return an owner-verified, uniquely cached GridFS working copy."""
     file_id = document.get(id_field)
     if not file_id:
         return None
 
+    owner_id = str(document.get("ownerId", ""))
+    if not owner_id:
+        raise HTTPException(status_code=403, detail="Dataset owner is missing.")
+
+    try:
+        object_id = ObjectId(str(file_id))
+    except Exception:
+        raise HTTPException(status_code=404, detail="Stored file not found.")
+
+    # Verify the GridFS metadata before opening the file. A dataset record
+    # belonging to one user must never resolve another user's GridFS object.
+    file_record = db["dataset_files.files"].find_one({"_id": object_id})
+    metadata = (file_record or {}).get("metadata") or {}
+    if not file_record or str(metadata.get("ownerId", "")) != owner_id:
+        raise HTTPException(status_code=404, detail="Stored file not found.")
+
+    metadata_dataset_id = metadata.get("datasetId")
+    document_id = str(document.get("_id", ""))
+    if metadata_dataset_id is not None and str(metadata_dataset_id) != document_id:
+        raise HTTPException(status_code=404, detail="Stored file not found.")
+
     safe_name = Path(str(name or "dataset.bin")).name
-    # GridFS downloads are only temporary working copies. Keep them separate
-    # from uploads/cleaned so clearing cache can never delete source datasets.
     directory = CACHE_DIR.resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    path = (directory / safe_name).resolve()
-
-    # Guard against path traversal from stored metadata.
+    # Include the immutable GridFS ID so equal filenames never collide and
+    # replacing a file cannot accidentally reuse stale cached bytes.
+    path = (directory / f"{object_id}_{safe_name}").resolve()
     if directory not in path.parents:
         raise HTTPException(status_code=400, detail="Invalid stored filename.")
 
     if not path.exists():
         try:
-            with fs.open_download_stream(ObjectId(str(file_id))) as stream:
+            with fs.open_download_stream(object_id) as stream:
                 data = stream.read()
             path.write_bytes(data)
         except Exception as error:
             raise HTTPException(
                 status_code=404,
-                detail=f"Persistent dataset file could not be loaded: {error}"
-            )
+                detail="Persistent dataset file could not be loaded."
+            ) from error
     return path
 
 
@@ -571,14 +587,21 @@ def _save_gridfs_file(path, filename, owner_id=None, dataset_id=None, role=None)
             return str(target._id)
 
 
-def _delete_gridfs_file(file_id):
-    if not file_id:
+def _delete_gridfs_file(file_id, owner_id, dataset_id=None):
+    """Delete a GridFS object only when its owner (and optional dataset) match."""
+    if not file_id or not owner_id:
         return False
     try:
-        fs.delete(ObjectId(str(file_id)))
+        object_id = ObjectId(str(file_id))
+        query = {"_id": object_id, "metadata.ownerId": str(owner_id)}
+        if dataset_id is not None:
+            query["metadata.datasetId"] = str(dataset_id)
+        if not db["dataset_files.files"].find_one(query, {"_id": 1}):
+            print("GRIDFS DELETE BLOCKED: ownership metadata did not match")
+            return False
+        fs.delete(object_id)
         return True
     except Exception as error:
-        # Missing files should not prevent the dataset record being removed.
         print("GRIDFS DELETE WARNING:", repr(error))
         return False
 
@@ -2213,7 +2236,7 @@ def delete_dataset(
     ):
         file_id = document.get(id_field)
         if file_id:
-            _delete_gridfs_file(file_id)
+            _delete_gridfs_file(file_id, owner_id=owner_id)
 
     # -----------------------------------------------------
     # DELETE DATASET DB RECORD
@@ -3535,13 +3558,13 @@ def clean_dataset(
     # has been stored successfully.
     previous_cleaned_id = document.get("cleanedGridFsId")
     if previous_cleaned_id:
-        _delete_gridfs_file(previous_cleaned_id)
+        _delete_gridfs_file(previous_cleaned_id, owner_id=str(current_user["_id"]), dataset_id=document["_id"])
 
     datasets_collection.update_one(
 
         {
-            "_id":
-                document["_id"]
+            "_id": document["_id"],
+            "ownerId": str(current_user["_id"])
         },
 
         {
