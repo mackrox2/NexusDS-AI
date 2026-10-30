@@ -264,166 +264,179 @@ def issue_otp(document_id, email, name, existing_document=None):
 
         raise
 
+def _send_brevo_email(email: str, subject: str, html_body: str, text_body: str, recipient_name: str = ""):
+    """Send a transactional email through Brevo's v3 SMTP API."""
+    api_key = os.getenv("BREVO_API_KEY", "").strip()
+    sender_email = os.getenv("BREVO_FROM_EMAIL", "").strip()
+    sender_name = os.getenv("BREVO_FROM_NAME", APP_NAME).strip() or APP_NAME
+
+    if not api_key:
+        raise RuntimeError("BREVO_API_KEY is missing in the deployment environment.")
+    if not sender_email:
+        raise RuntimeError(
+            "BREVO_FROM_EMAIL is missing. Set it to the verified sender address in Brevo."
+        )
+
+    payload = {
+        "sender": {"name": sender_name, "email": sender_email},
+        "to": [{"email": email, **({"name": recipient_name} if recipient_name else {})}],
+        "subject": subject,
+        "htmlContent": html_body,
+        "textContent": text_body,
+    }
+
+    try:
+        response = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "api-key": api_key,
+                "accept": "application/json",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+    except requests.RequestException as error:
+        raise RuntimeError(f"Brevo connection failed: {error}") from error
+
+    if not response.ok:
+        # Avoid returning provider credentials or excessive response data.
+        raise RuntimeError(
+            f"Brevo API returned {response.status_code}: {response.text[:500]}"
+        )
+
+
 def send_verification_email(email: str, name: str, otp: str):
-
-    """Send OTP through Resend when configured; otherwise use Gmail SMTP."""
-
+    """Send an email verification or password-reset OTP using Brevo first."""
     safe_name = html.escape(name)
-
     safe_app_name = html.escape(APP_NAME)
-
     subject = f"{APP_NAME} - Email verification code"
-
     html_body = f"""
-
         <div style="font-family:Arial,sans-serif;padding:24px">
-
             <h2>{safe_app_name}</h2>
-
             <p>Hello {safe_name},</p>
-
-            <p>Your email verification code is:</p>
-
+            <p>Your verification / password reset code is:</p>
             <h1 style="letter-spacing:8px">{otp}</h1>
-
             <p>This code expires in {OTP_EXPIRE_MINUTES} minutes.</p>
-
             <p>If you did not request this, ignore this email.</p>
-
         </div>
-
     """
+    text_body = (
+        f"Hello {name},\n\nYour {APP_NAME} code is: {otp}\n\n"
+        f"This code expires in {OTP_EXPIRE_MINUTES} minutes.\n"
+        "If you did not request this, ignore this email."
+    )
 
+    brevo_api_key = os.getenv("BREVO_API_KEY", "").strip()
+    if brevo_api_key:
+        _send_brevo_email(email, subject, html_body, text_body, name)
+        return
+
+    # Backward-compatible Resend fallback for deployments not yet migrated.
     api_key = os.getenv("RESEND_API_KEY", "").strip()
-
     resend_sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
-
-    # Use Resend only when configured; incomplete Resend configuration is an error.
-
     if api_key or resend_sender:
-
         if not api_key:
-
             raise RuntimeError("RESEND_API_KEY is missing in the deployment environment.")
-
         if not resend_sender:
-
             raise RuntimeError("RESEND_FROM_EMAIL is missing. Set a verified sender in Resend.")
 
         payload = {
-
             "from": f"{safe_app_name} <{resend_sender}>",
-
             "to": [email],
-
             "subject": subject,
-
             "html": html_body,
-
         }
-
         try:
-
             response = requests.post(
-
                 "https://api.resend.com/emails",
-
                 headers={
-
                     "Authorization": f"Bearer {api_key}",
-
                     "Content-Type": "application/json",
-
                 },
-
                 json=payload,
-
                 timeout=20,
-
             )
-
         except requests.RequestException as error:
-
             raise RuntimeError(f"Resend connection failed: {error}") from error
-
         if not response.ok:
-
-            raise RuntimeError(f"Resend API returned {response.status_code}: {response.text}")
-
+            raise RuntimeError(f"Resend API returned {response.status_code}: {response.text[:500]}")
         return
 
-    # Fallback to SMTP for deployments/local environments that already use Gmail.
-
+    # Last-resort legacy SMTP fallback for local environments.
     if not SMTP_USER or not SMTP_PASSWORD or not FROM_EMAIL:
-
         raise RuntimeError(
-
-            "Email is not configured. Set RESEND_API_KEY and RESEND_FROM_EMAIL, "
-
-            "or SMTP_USER, SMTP_PASSWORD and FROM_EMAIL."
-
+            "Email is not configured. Set BREVO_API_KEY and BREVO_FROM_EMAIL, "
+            "or RESEND_API_KEY and RESEND_FROM_EMAIL."
         )
 
     message = EmailMessage()
-
     message["Subject"] = subject
-
     message["From"] = FROM_EMAIL
-
     message["To"] = email
-
-    message.set_content(
-
-        f"Hello {name},\n\nYour {APP_NAME} verification code is: {otp}\n\n"
-
-        f"This code expires in {OTP_EXPIRE_MINUTES} minutes.\n"
-
-        "If you did not request this, you can safely ignore this email.\n"
-
-    )
-
+    message.set_content(text_body)
     message.add_alternative(html_body, subtype="html")
 
     try:
-
         context = ssl.create_default_context()
-
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-
             server.ehlo()
-
             server.starttls(context=context)
-
             server.ehlo()
-
             server.login(SMTP_USER, SMTP_PASSWORD)
-
             server.send_message(message)
-
     except Exception as error:
-
         raise RuntimeError(f"SMTP email delivery failed: {error}") from error
 
+
 def send_verification_link(email: str, name: str, token: str):
-    """Send a one-time email verification link using the configured Resend sender."""
-    api_key = os.getenv("RESEND_API_KEY", "").strip()
-    sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
-    if not api_key or not sender:
-        raise RuntimeError("Email sender is not configured. Set RESEND_API_KEY and a verified RESEND_FROM_EMAIL.")
+    """Send a one-time email verification link using Brevo, with Resend fallback."""
     frontend_url = os.getenv("FRONTEND_URL", "https://nexusds-ai.pages.dev").strip().rstrip("/")
     link = f"{frontend_url}/verify-email?token={token}"
     safe_name = html.escape(name)
     safe_app = html.escape(APP_NAME)
     safe_link = html.escape(link, quote=True)
+    subject = f"{APP_NAME} - Verify your email"
+    html_body = (
+        f"<div><h2>{safe_app}</h2><p>Hello {safe_name},</p>"
+        f"<p>Click below to verify your NexusDS AI account.</p>"
+        f"<p><a href=\"{safe_link}\">Verify email address</a></p>"
+        f"<p>This link expires in 30 minutes and can only be used once.</p>"
+        f"<p>If you did not create this account, ignore this email.</p></div>"
+    )
+    text_body = (
+        f"Hello {name},\n\nVerify your NexusDS AI email address using this link:\n{link}\n\n"
+        "This link expires in 30 minutes and can only be used once."
+    )
+
+    if os.getenv("BREVO_API_KEY", "").strip():
+        _send_brevo_email(email, subject, html_body, text_body, name)
+        return
+
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
+    if not api_key or not sender:
+        raise RuntimeError(
+            "Email sender is not configured. Set BREVO_API_KEY and BREVO_FROM_EMAIL, "
+            "or RESEND_API_KEY and RESEND_FROM_EMAIL."
+        )
     payload = {
         "from": f"{safe_app} <{sender}>",
         "to": [email],
-        "subject": f"{APP_NAME} - Verify your email",
-        "html": (f"<div><h2>{safe_app}</h2><p>Hello {safe_name},</p><p>Click below to verify your NexusDS AI account.</p><p><a href=\"{safe_link}\">Verify email address</a></p><p>This link expires in 30 minutes and can only be used once.</p><p>If you did not create this account, ignore this email.</p></div>"),
+        "subject": subject,
+        "html": html_body,
     }
-    response = requests.post("https://api.resend.com/emails", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload, timeout=20)
-    if response.status_code >= 400:
-        raise RuntimeError(f"Email provider rejected the message ({response.status_code}): {response.text[:300]}")
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=20,
+        )
+    except requests.RequestException as error:
+        raise RuntimeError(f"Resend connection failed: {error}") from error
+    if not response.ok:
+        raise RuntimeError(f"Resend API returned {response.status_code}: {response.text[:500]}")
 
 
 @router.post("/register")
