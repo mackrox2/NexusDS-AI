@@ -3846,11 +3846,11 @@ Give a direct answer in short bullets or a short paragraph.
 
 
 def _gemini_generate(contents, config=None):
-    """Call Gemini with retries while preserving the existing API behavior."""
+    """Fast Gemini call: try the primary once, then one configured fallback."""
     if gemini_client is None:
         raise RuntimeError("Gemini client could not be initialized.")
 
-    configured = GEMINI_MODEL or "gemini-3.8-flash"
+    configured = GEMINI_MODEL or "gemini-3.8-flash-lite"
     fallback = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 
     models = []
@@ -3859,39 +3859,33 @@ def _gemini_generate(contents, config=None):
             models.append(name)
 
     last_error = None
-
-    for model_name in models:
-        for attempt in range(3):
-            try:
-                return gemini_client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=config or {},
+    for index, model_name in enumerate(models):
+        try:
+            return gemini_client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=config or {},
+            )
+        except Exception as error:
+            last_error = error
+            message = str(error).lower()
+            transient = any(
+                token in message
+                for token in (
+                    "429", "500", "502", "503", "504",
+                    "unavailable", "high demand", "overloaded",
+                    "resource exhausted", "temporarily",
                 )
-            except Exception as error:
-                last_error = error
-                message = str(error).lower()
+            )
 
-                # Only retry failures that are normally transient.
-                transient = any(
-                    token in message
-                    for token in (
-                        "429", "500", "502", "503", "504",
-                        "unavailable", "high demand", "overloaded",
-                        "resource exhausted", "temporarily",
-                    )
-                )
+            # Do not wait through repeated retries: switch to the fallback
+            # immediately for transient provider errors.
+            if not transient or index == len(models) - 1:
+                raise RuntimeError(
+                    f"Gemini request failed on model {model_name}: {error}"
+                ) from error
 
-                if not transient:
-                    raise
-
-                if attempt < 2:
-                    time.sleep(1.5 * (attempt + 1))
-
-    raise RuntimeError(
-        "Gemini is temporarily unavailable after retries. "
-        f"Last error: {last_error}"
-    )
+    raise RuntimeError(f"Gemini is temporarily unavailable: {last_error}")
 
 # =========================================================
 # GEMINI AI
@@ -3920,7 +3914,7 @@ def ask_gemini(question, df):
         response = _gemini_generate(
             contents=prompt,
             config={
-                "max_output_tokens": 12000,
+                "max_output_tokens": 1000,
                 "temperature": 0.2
             }
         )
