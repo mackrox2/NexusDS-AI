@@ -595,7 +595,13 @@ def _delete_gridfs_file(file_id, owner_id, dataset_id=None):
         object_id = ObjectId(str(file_id))
         query = {"_id": object_id, "metadata.ownerId": str(owner_id)}
         if dataset_id is not None:
-            query["metadata.datasetId"] = str(dataset_id)
+            # New uploads are dataset-bound. Also allow older owner-bound
+            # files with no datasetId so legacy cleanup remains possible.
+            query["$or"] = [
+                {"metadata.datasetId": str(dataset_id)},
+                {"metadata.datasetId": {"$exists": False}},
+                {"metadata.datasetId": None},
+            ]
         if not db["dataset_files.files"].find_one(query, {"_id": 1}):
             print("GRIDFS DELETE BLOCKED: ownership metadata did not match")
             return False
@@ -1698,25 +1704,35 @@ async def upload_dataset(
         except OSError:
             pass
 
+        # Allocate the dataset ID before writing files so every GridFS
+        # object is linked to this exact dataset from the moment it is stored.
+        dataset_object_id = ObjectId()
+        dataset_id = str(dataset_object_id)
+        gridfs_ids = []
+
         # Save original + normalized outputs in persistent MongoDB GridFS.
         # Local files are only working copies/cache; GridFS is the source of truth.
         original_gridfs_id = _save_gridfs_file(
             original_path, original_stored_name,
-            owner_id=current_user["_id"], role="original"
+            owner_id=current_user["_id"], dataset_id=dataset_id, role="original"
         )
+        gridfs_ids.append(original_gridfs_id)
         analysis_gridfs_id = _save_gridfs_file(
             final_analysis_path, analysis_stored_name,
-            owner_id=current_user["_id"], role="analysis"
+            owner_id=current_user["_id"], dataset_id=dataset_id, role="analysis"
         )
+        gridfs_ids.append(analysis_gridfs_id)
         csv_gridfs_id = _save_gridfs_file(
             final_csv_path, csv_stored_name,
-            owner_id=current_user["_id"], role="converted_csv"
+            owner_id=current_user["_id"], dataset_id=dataset_id, role="converted_csv"
         )
+        gridfs_ids.append(csv_gridfs_id)
 
         df = conversion["dataframe"]
         now = datetime.utcnow()
 
         document = {
+            "_id": dataset_object_id,
             "ownerId": str(current_user["_id"]),
             "ownerEmail": current_user.get("email", ""),
             "fileName": original_name,
@@ -1748,8 +1764,7 @@ async def upload_dataset(
             "convertedCsvGridFsId": csv_gridfs_id,
         }
 
-        result = datasets_collection.insert_one(document)
-        dataset_id = str(result.inserted_id)
+        datasets_collection.insert_one(document)
 
         return safe({
             "success": True,
@@ -1784,28 +1799,47 @@ async def upload_dataset(
         })
 
     except HTTPException:
-        if original_path.exists():
-            original_path.unlink()
+        # Roll back any GridFS objects created before the failure.
+        for file_id in locals().get("gridfs_ids", []):
+            _delete_gridfs_file(file_id, current_user["_id"])
+        for path in [
+            original_path,
+            locals().get("final_analysis_path"),
+            locals().get("final_csv_path"),
+        ]:
+            if path and Path(path).exists():
+                try:
+                    Path(path).unlink()
+                except OSError:
+                    pass
         raise
 
     except Exception as error:
-        for path in [original_path]:
-            if path.exists():
-                path.unlink()
+        # Best-effort rollback keeps failed uploads from leaving orphaned data.
+        for file_id in locals().get("gridfs_ids", []):
+            _delete_gridfs_file(file_id, current_user["_id"])
+        for path in [
+            original_path,
+            locals().get("final_analysis_path"),
+            locals().get("final_csv_path"),
+        ]:
+            if path and Path(path).exists():
+                try:
+                    Path(path).unlink()
+                except OSError:
+                    pass
 
-        # Best-effort cleanup of generated files if the DB insert/conversion
-        # fails midway.
         for candidate in converted_dir.glob("*") if converted_dir.exists() else []:
             try:
                 candidate.unlink()
-            except Exception:
+            except OSError:
                 pass
 
         print("UNIVERSAL UPLOAD ERROR:", repr(error))
         raise HTTPException(
             500,
-            f"File processing failed: {error}",
-        )
+            "File processing failed. Check the backend logs for the request details.",
+        ) from error
 
 
 # =========================================================

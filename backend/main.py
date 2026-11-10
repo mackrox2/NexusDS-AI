@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from database.mongodb import client
@@ -58,12 +58,14 @@ def health():
             "database": "connected",
         }
     except Exception as error:
-        return {
-            "success": False,
-            "status": "unhealthy",
-            "database": "disconnected",
-            "error": str(error),
-        }
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "success": False,
+                "status": "unhealthy",
+                "database": "disconnected",
+            },
+        )
 
 
 @app.get("/api/ml/health")
