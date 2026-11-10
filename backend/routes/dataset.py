@@ -595,7 +595,13 @@ def _delete_gridfs_file(file_id, owner_id, dataset_id=None):
         object_id = ObjectId(str(file_id))
         query = {"_id": object_id, "metadata.ownerId": str(owner_id)}
         if dataset_id is not None:
-            query["metadata.datasetId"] = str(dataset_id)
+            # New uploads are dataset-bound. Also allow older owner-bound
+            # files with no datasetId so legacy cleanup remains possible.
+            query["$or"] = [
+                {"metadata.datasetId": str(dataset_id)},
+                {"metadata.datasetId": {"$exists": False}},
+                {"metadata.datasetId": None},
+            ]
         if not db["dataset_files.files"].find_one(query, {"_id": 1}):
             print("GRIDFS DELETE BLOCKED: ownership metadata did not match")
             return False
