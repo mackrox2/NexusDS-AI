@@ -541,13 +541,24 @@ def _gridfs_cached_path(document, id_field, name, directory):
     # belonging to one user must never resolve another user's GridFS object.
     file_record = db["dataset_files.files"].find_one({"_id": object_id})
     metadata = (file_record or {}).get("metadata") or {}
-    if not file_record or str(metadata.get("ownerId", "")) != owner_id:
-        raise HTTPException(status_code=404, detail="Stored file not found.")
+    if not file_record:
+        raise HTTPException(
+            status_code=404,
+            detail="Dataset file is missing from persistent storage. Please re-upload the original file."
+        )
+    if str(metadata.get("ownerId", "")) != owner_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Dataset file ownership metadata is missing or does not match. Please re-upload the original file."
+        )
 
     metadata_dataset_id = metadata.get("datasetId")
     document_id = str(document.get("_id", ""))
     if metadata_dataset_id is not None and str(metadata_dataset_id) != document_id:
-        raise HTTPException(status_code=404, detail="Stored file not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Dataset file reference does not match its storage record. Please re-upload the original file."
+        )
 
     safe_name = Path(str(name or "dataset.bin")).name
     directory = CACHE_DIR.resolve()
@@ -638,7 +649,7 @@ def get_file_path(document):
     if not path.exists():
         raise HTTPException(
             status_code=404,
-            detail="Dataset file was not found in persistent storage or legacy uploads."
+            detail="Dataset file is not available in persistent storage or legacy uploads. Please re-upload the original file."
         )
     return path
 
