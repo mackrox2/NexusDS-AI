@@ -427,38 +427,43 @@ structured information. If extraction is genuinely impossible, return [].
 
 
 def _extract_pdf(file_path: Path) -> pd.DataFrame:
-    # Gemini can process both native and scanned PDFs. This keeps the same
-    # extraction path for text PDFs, scanned PDFs and mixed PDFs.
-    rows = _gemini_json_from_file(
-        file_path,
-        """
-Extract every meaningful table from this PDF. Preserve table headers,
-row/column relationships, page-spanning tables and repeated headers.
-Do not merge unrelated tables unless their columns clearly represent the
-same schema.
-""",
-    )
-
-    if rows:
-        return normalize_dataframe(pd.DataFrame(rows))
-
-    # Text-only fallback for PDFs where a local parser is available.
+    """Prefer native PDF text; use Gemini for structured/scanned extraction."""
+    extracted_text = ""
     try:
         from pypdf import PdfReader
-
         reader = PdfReader(str(file_path))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages)
-
-        if text.strip():
-            return normalize_dataframe(
-                pd.DataFrame(
-                    [{"Extracted_Text": line.strip()} for line in text.splitlines() if line.strip()]
-                )
-            )
+        extracted_text = "\n".join((page.extract_text() or "") for page in reader.pages)
     except Exception:
-        pass
+        extracted_text = ""
 
-    return pd.DataFrame()
+    if _client is not None:
+        try:
+            rows = _gemini_json_from_file(
+                file_path,
+                "Extract meaningful tables from this PDF. Preserve headers and row relationships. Never invent values.",
+            )
+            if rows:
+                return normalize_dataframe(pd.DataFrame(rows))
+        except Exception as error:
+            print("PDF GEMINI EXTRACTION WARNING:", repr(error))
+
+    if extracted_text.strip():
+        lines = [line.strip() for line in extracted_text.splitlines() if line.strip()]
+        try:
+            frame = pd.read_csv(io.StringIO("\n".join(lines)), sep=None, engine="python")
+            if frame.shape[1] > 1:
+                return normalize_dataframe(frame)
+        except Exception:
+            pass
+        return normalize_dataframe(pd.DataFrame({"Extracted_Text": lines}))
+
+    if _client is None:
+        raise RuntimeError("This PDF appears scanned or image-only. Set GEMINI_API_KEY to enable OCR extraction.")
+    rows = _gemini_json_from_file(
+        file_path,
+        "Extract readable tables and structured information from this scanned PDF. Do not guess unclear values.",
+    )
+    return normalize_dataframe(pd.DataFrame(rows))
 
 
 def _extract_image(file_path: Path) -> pd.DataFrame:
@@ -530,12 +535,78 @@ def _extract_word(file_path: Path) -> pd.DataFrame:
         ) from error
 
 
+def _extract_text_file(file_path: Path) -> pd.DataFrame:
+    ext = file_path.suffix.lower()
+    if ext in {".html", ".htm"}:
+        try:
+            tables = pd.read_html(file_path)
+            if tables:
+                return normalize_dataframe(pd.concat(tables, ignore_index=True, sort=False))
+        except ValueError:
+            pass
+        except Exception as error:
+            raise ValueError(f"Unable to parse HTML: {error}") from error
+        try:
+            from bs4 import BeautifulSoup
+            html = file_path.read_text(encoding="utf-8", errors="replace")
+            text = BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
+        except Exception as error:
+            raise ValueError(f"Unable to extract HTML text: {error}") from error
+    else:
+        text = file_path.read_text(encoding="utf-8-sig", errors="replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("The text document is empty.")
+    try:
+        frame = pd.read_csv(io.StringIO("\n".join(lines)), sep=None, engine="python")
+        if frame.shape[1] > 1:
+            return normalize_dataframe(frame)
+    except Exception:
+        pass
+    return normalize_dataframe(pd.DataFrame({"Content": lines}))
+
+
+def _extract_presentation(file_path: Path) -> pd.DataFrame:
+    try:
+        from pptx import Presentation
+    except ImportError as error:
+        raise RuntimeError("PPTX support requires python-pptx. Install backend requirements.") from error
+    presentation = Presentation(str(file_path))
+    records = []
+    for slide_number, slide in enumerate(presentation.slides, start=1):
+        for shape in slide.shapes:
+            if getattr(shape, "has_table", False):
+                table = shape.table
+                if len(table.rows) > 1:
+                    headers = [cell.text.strip() or f"Column_{i + 1}" for i, cell in enumerate(table.rows[0].cells)]
+                    for row in table.rows[1:]:
+                        records.append({"Slide": slide_number, **{
+                            headers[i]: row.cells[i].text.strip()
+                            for i in range(min(len(headers), len(row.cells))
+                        }})
+                else:
+                    records.append({"Slide": slide_number, "Content": " | ".join(cell.text.strip() for cell in table.rows[0].cells)})
+            elif getattr(shape, "has_text_frame", False):
+                value = shape.text.strip()
+                if value:
+                    records.append({"Slide": slide_number, "Content": value})
+    if not records:
+        raise ValueError("No readable text or tables were found in this PowerPoint.")
+    return normalize_dataframe(pd.DataFrame(records))
+
+
 def extract_dataframe(file_path: Path) -> tuple[pd.DataFrame, str]:
     ext = file_path.suffix.lower()
     category = file_category(ext)
 
     if category == "tabular":
         return read_tabular(file_path), "native"
+
+    if category == "text":
+        return _extract_text_file(file_path), "text-extraction"
+
+    if category == "presentation":
+        return _extract_presentation(file_path), "presentation-extraction"
 
     if category == "image":
         return _extract_image(file_path), "ocr"
