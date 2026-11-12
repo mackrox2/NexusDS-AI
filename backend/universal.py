@@ -313,7 +313,7 @@ def _gemini_generate(contents, config=None):
     fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 
     models = []
-    for model_name in (configured_model, fallback_model, "gemini-3.8-flash-lite"):
+    for model_name in (configured_model, fallback_model, "gemini-3.5-flash-lite"):
         if model_name and model_name not in models:
             models.append(model_name)
 
@@ -389,7 +389,6 @@ structured information. If extraction is genuinely impossible, return [].
         response = _gemini_generate(
             contents=contents,
             config={
-                "thinking_config": {"thinking_level": "minimal"},
                 "response_mime_type": "application/json",
                 "max_output_tokens": 12000,
                 "temperature": 0.0,
