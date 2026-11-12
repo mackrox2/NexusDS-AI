@@ -297,10 +297,11 @@ def _is_transient_gemini_error(error: Exception) -> bool:
 
 def _gemini_generate(contents, config=None):
     """
-    Central Gemini caller for this ingestion engine.
+    Fast Gemini caller for image/scanned-PDF extraction.
 
-    Existing extraction behavior is preserved. Transient provider failures
-    are retried and, when configured, a fallback model is attempted.
+    Avoids long retry cascades: use the configured model first, retry a
+    transient provider failure once, and only use a fallback for model
+    availability/configuration errors.
     """
     if _client is None:
         raise RuntimeError(
@@ -308,18 +309,26 @@ def _gemini_generate(contents, config=None):
             "Set GEMINI_API_KEY in backend/.env."
         )
 
-    configured_model = GEMINI_MODEL or "gemini-3.8-flash"
+    configured_model = GEMINI_MODEL or "gemini-2.5-flash"
     fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
+    model_error_tokens = (
+        "404", "not found", "unknown model", "unsupported model",
+        "invalid model", "model is not found",
+    )
+    transient_tokens = (
+        "429", "500", "502", "503", "504", "unavailable",
+        "high demand", "overloaded", "resource exhausted",
+        "temporarily",
+    )
 
-    models = []
-    for model_name in (configured_model, fallback_model, "gemini-3.5-flash-lite"):
-        if model_name and model_name not in models:
-            models.append(model_name)
+    models = [configured_model]
+    if fallback_model and fallback_model != configured_model:
+        models.append(fallback_model)
 
     last_error = None
-
-    for model_name in models:
-        for attempt in range(3):
+    for model_index, model_name in enumerate(models):
+        # One normal attempt plus one retry only for transient failures.
+        for attempt in range(2):
             try:
                 return _client.models.generate_content(
                     model=model_name,
@@ -328,19 +337,28 @@ def _gemini_generate(contents, config=None):
                 )
             except Exception as error:
                 last_error = error
+                message = str(error).lower()
+                is_model_error = any(token in message for token in model_error_tokens)
+                is_transient = any(token in message for token in transient_tokens)
 
-                model_error = any(token in str(error).lower() for token in ("404", "not found", "unknown model", "unsupported model", "invalid model"))
-                if not _is_transient_gemini_error(error) and not model_error:
-                    raise
+                # A bad model name should move directly to the configured
+                # fallback instead of wasting retries on the same model.
+                if is_model_error:
+                    break
+                if is_transient and attempt == 0:
+                    time.sleep(0.8)
+                    continue
+                # Do not cascade through retries for auth, quota, or bad input.
+                raise
 
-                if attempt < 2:
-                    time.sleep(1.5 * (attempt + 1))
+        # Continue only when the configured model is unavailable.
+        if model_index == len(models) - 1:
+            break
 
     raise RuntimeError(
-        "Gemini is temporarily unavailable after retries and fallback. "
-        f"Last error: {last_error}"
+        "Gemini model is unavailable. Check GEMINI_MODEL and "
+        f"GEMINI_FALLBACK_MODEL. Last error: {last_error}"
     )
-
 
 def _gemini_json_from_file(file_path: Path, instruction: str) -> list[dict]:
     if _client is None:
