@@ -188,11 +188,10 @@ def read_tabular(file_path: Path) -> pd.DataFrame:
         last_error = None
         for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
             try:
-                options = {"encoding": encoding, "low_memory": False}
                 if separator:
-                    options["sep"] = separator
+                    options = {"encoding": encoding, "sep": separator, "low_memory": False}
                 else:
-                    options.update({"sep": None, "engine": "python"})
+                    options = {"encoding": encoding, "sep": None, "engine": "python"}
                 return normalize_dataframe(pd.read_csv(file_path, **options))
             except Exception as error:
                 last_error = error
