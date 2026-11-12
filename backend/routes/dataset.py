@@ -92,6 +92,17 @@ ALLOWED_EXTENSIONS = {
     ".bmp",
     ".tif",
     ".tiff",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".ndjson",
+    ".parquet",
+    ".pptx",
+    ".txt",
+    ".md",
+    ".log",
+    ".html",
+    ".htm",
 }
 
 
@@ -1673,8 +1684,8 @@ async def upload_dataset(
             400,
             (
                 "Unsupported file type. Supported formats: "
-                "CSV, XLSX, XLS, PDF, DOCX, DOC, JPG, JPEG, PNG, "
-                "WEBP, BMP, TIF and TIFF."
+                "CSV, TSV, XLSX, XLS, JSON, JSONL, Parquet, PDF, DOCX, DOC, "
+                "PPTX, TXT, Markdown, HTML, JPG, JPEG, PNG, WEBP, BMP, TIF and TIFF."
             ),
         )
 
@@ -1687,8 +1698,23 @@ async def upload_dataset(
     converted_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        max_upload_bytes = 100 * 1024 * 1024
+        total_bytes = 0
         with open(original_path, "wb") as buffer:
-            shutil.copyfileobj(dataset.file, buffer)
+            while True:
+                chunk = dataset.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > max_upload_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="File is larger than the 100 MB upload limit.",
+                    )
+                buffer.write(chunk)
+
+        if total_bytes == 0:
+            raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
         conversion = convert_to_analysis_files(
             original_path=original_path,
