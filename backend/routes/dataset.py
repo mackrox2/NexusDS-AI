@@ -3983,10 +3983,14 @@ def _gemini_generate(contents, config=None):
                     "resource exhausted", "temporarily",
                 )
             )
+            model_error = any(
+                token in message
+                for token in ("404", "not found", "unknown model", "unsupported model", "invalid model")
+            )
 
             # Do not wait through repeated retries: switch to the fallback
             # immediately for transient provider errors.
-            if not transient or index == len(models) - 1:
+            if (not transient and not model_error) or index == len(models) - 1:
                 raise RuntimeError(
                     f"Gemini request failed on model {model_name}: {error}"
                 ) from error
