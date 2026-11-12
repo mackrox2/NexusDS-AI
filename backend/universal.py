@@ -45,7 +45,9 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _PDF_EXTENSIONS = {".pdf"}
 _WORD_EXTENSIONS = {".docx", ".doc"}
-_TABULAR_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+_PRESENTATION_EXTENSIONS = {".pptx"}
+_TEXT_EXTENSIONS = {".txt", ".md", ".log", ".html", ".htm"}
+_TABULAR_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".json", ".jsonl", ".ndjson", ".parquet"}
 
 MIME_TYPES = {
     ".jpg": "image/jpeg",
@@ -72,6 +74,8 @@ def supported_extension(extension: str) -> bool:
         | _PDF_EXTENSIONS
         | _WORD_EXTENSIONS
         | _IMAGE_EXTENSIONS
+        | _PRESENTATION_EXTENSIONS
+        | _TEXT_EXTENSIONS
     )
 
 
@@ -85,6 +89,10 @@ def file_category(extension: str) -> str:
         return "word"
     if ext in _IMAGE_EXTENSIONS:
         return "image"
+    if ext in _PRESENTATION_EXTENSIONS:
+        return "presentation"
+    if ext in _TEXT_EXTENSIONS:
+        return "text"
     return "unknown"
 
 
@@ -172,17 +180,49 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def read_tabular(file_path: Path) -> pd.DataFrame:
+    """Read common structured formats with encoding and schema fallbacks."""
     ext = file_path.suffix.lower()
 
-    if ext == ".csv":
-        # UTF-8 first, then common Indian/Windows fallback.
-        try:
-            return normalize_dataframe(pd.read_csv(file_path))
-        except UnicodeDecodeError:
-            return normalize_dataframe(pd.read_csv(file_path, encoding="latin1"))
+    if ext in {".csv", ".tsv"}:
+        separator = "\\t" if ext == ".tsv" else None
+        last_error = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
+            try:
+                options = {"encoding": encoding, "low_memory": False}
+                if separator:
+                    options["sep"] = separator
+                else:
+                    options.update({"sep": None, "engine": "python"})
+                return normalize_dataframe(pd.read_csv(file_path, **options))
+            except Exception as error:
+                last_error = error
+        raise ValueError(f"Unable to parse delimited file: {last_error}")
 
     if ext in {".xlsx", ".xls"}:
-        return normalize_dataframe(pd.read_excel(file_path))
+        return normalize_dataframe(pd.read_excel(file_path, sheet_name=0))
+
+    if ext in {".json", ".jsonl", ".ndjson"}:
+        if ext in {".jsonl", ".ndjson"}:
+            frame = pd.read_json(file_path, lines=True)
+        else:
+            with open(file_path, "r", encoding="utf-8-sig") as source:
+                payload = json.load(source)
+            if isinstance(payload, list):
+                frame = pd.json_normalize(payload, sep=".")
+            elif isinstance(payload, dict):
+                records = next(
+                    (value for value in payload.values()
+                     if isinstance(value, list) and value
+                     and all(isinstance(item, dict) for item in value)),
+                    None,
+                )
+                frame = pd.json_normalize(records, sep=".") if records is not None else pd.json_normalize(payload, sep=".")
+            else:
+                raise ValueError("JSON must contain an object or an array of records.")
+        return normalize_dataframe(frame)
+
+    if ext == ".parquet":
+        return normalize_dataframe(pd.read_parquet(file_path))
 
     raise ValueError(f"Unsupported tabular extension: {ext}")
 
