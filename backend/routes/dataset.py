@@ -3817,6 +3817,12 @@ def dataset_facts(df):
             },
 
         "numeric_statistics":
+            {},
+        # A bounded sample lets Gemini answer concrete questions about
+        # actual records instead of receiving only aggregate statistics.
+        "sample_rows":
+            safe(df.iloc[:25, :30].to_dict(orient="records")),
+        "top_categorical_values":
             {}
     }
 
@@ -3881,6 +3887,13 @@ def dataset_facts(df):
                     values.std()
                 )
         }
+
+        if not pd.api.types.is_numeric_dtype(df[column]) and not pd.api.types.is_datetime64_any_dtype(df[column]):
+            counts = df[column].dropna().astype(str).value_counts().head(10)
+            if not counts.empty:
+                facts["top_categorical_values"][str(column)] = {
+                    str(value): int(count) for value, count in counts.items()
+                }
 
     return safe(
         facts
