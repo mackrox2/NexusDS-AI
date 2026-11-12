@@ -582,7 +582,7 @@ def _extract_presentation(file_path: Path) -> pd.DataFrame:
                     for row in table.rows[1:]:
                         records.append({"Slide": slide_number, **{
                             headers[i]: row.cells[i].text.strip()
-                            for i in range(min(len(headers), len(row.cells))
+                            for i in range(min(len(headers), len(row.cells)))
                         }})
                 else:
                     records.append({"Slide": slide_number, "Content": " | ".join(cell.text.strip() for cell in table.rows[0].cells)})
