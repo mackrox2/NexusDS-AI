@@ -3956,11 +3956,11 @@ def _gemini_generate(contents, config=None):
     if gemini_client is None:
         raise RuntimeError("Gemini client could not be initialized.")
 
-    configured = GEMINI_MODEL or "gemini-3.8-flash-lite"
+    configured = GEMINI_MODEL or "gemini-3.8-flash"
     fallback = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 
     models = []
-    for name in (configured, fallback):
+    for name in (configured, fallback, "gemini-3.5-flash-lite"):
         if name and name not in models:
             models.append(name)
 
