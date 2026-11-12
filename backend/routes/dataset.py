@@ -84,7 +84,6 @@ ALLOWED_EXTENSIONS = {
     ".xls",
     ".pdf",
     ".docx",
-    ".doc",
     ".jpg",
     ".jpeg",
     ".png",
@@ -1691,7 +1690,7 @@ async def upload_dataset(
             400,
             (
                 "Unsupported file type. Supported formats: "
-                "CSV, TSV, XLSX, XLS, JSON, JSONL, Parquet, PDF, DOCX, DOC, "
+                "CSV, TSV, XLSX, XLS, JSON, JSONL, Parquet, PDF, DOCX, "
                 "PPTX, TXT, Markdown, HTML, JPG, JPEG, PNG, WEBP, BMP, TIF and TIFF."
             ),
         )
