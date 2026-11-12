@@ -556,12 +556,13 @@ def _extract_text_file(file_path: Path) -> pd.DataFrame:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         raise ValueError("The text document is empty.")
-    try:
-        frame = pd.read_csv(io.StringIO("\n".join(lines)), sep=None, engine="python")
-        if frame.shape[1] > 1:
-            return normalize_dataframe(frame)
-    except Exception:
-        pass
+    if any(delimiter in text for delimiter in (",", "\t", ";", "|")):
+        try:
+            frame = pd.read_csv(io.StringIO("\n".join(lines)), sep=None, engine="python")
+            if frame.shape[1] > 1:
+                return normalize_dataframe(frame)
+        except Exception:
+            pass
     return normalize_dataframe(pd.DataFrame({"Content": lines}))
 
 
