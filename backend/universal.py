@@ -330,7 +330,8 @@ def _gemini_generate(contents, config=None):
             except Exception as error:
                 last_error = error
 
-                if not _is_transient_gemini_error(error):
+                model_error = any(token in str(error).lower() for token in ("404", "not found", "unknown model", "unsupported model", "invalid model"))
+                if not _is_transient_gemini_error(error) and not model_error:
                     raise
 
                 if attempt < 2:
