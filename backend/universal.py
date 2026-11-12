@@ -44,7 +44,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _PDF_EXTENSIONS = {".pdf"}
-_WORD_EXTENSIONS = {".docx", ".doc"}
+_WORD_EXTENSIONS = {".docx"}
 _PRESENTATION_EXTENSIONS = {".pptx"}
 _TEXT_EXTENSIONS = {".txt", ".md", ".log", ".html", ".htm"}
 _TABULAR_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".json", ".jsonl", ".ndjson", ".parquet"}
