@@ -84,7 +84,6 @@ ALLOWED_EXTENSIONS = {
     ".xls",
     ".pdf",
     ".docx",
-    ".doc",
     ".jpg",
     ".jpeg",
     ".png",
@@ -92,6 +91,17 @@ ALLOWED_EXTENSIONS = {
     ".bmp",
     ".tif",
     ".tiff",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".ndjson",
+    ".parquet",
+    ".pptx",
+    ".txt",
+    ".md",
+    ".log",
+    ".html",
+    ".htm",
 }
 
 
@@ -1170,6 +1180,13 @@ def build_recommendations(df):
     # Outliers.
     for column in df.columns:
 
+        if not pd.api.types.is_numeric_dtype(df[column]) and not pd.api.types.is_datetime64_any_dtype(df[column]):
+            counts = df[column].dropna().astype(str).value_counts().head(10)
+            if not counts.empty:
+                facts["top_categorical_values"][str(column)] = {
+                    str(value): int(count) for value, count in counts.items()
+                }
+
         if (
             column_kind(
                 df[column]
@@ -1673,8 +1690,8 @@ async def upload_dataset(
             400,
             (
                 "Unsupported file type. Supported formats: "
-                "CSV, XLSX, XLS, PDF, DOCX, DOC, JPG, JPEG, PNG, "
-                "WEBP, BMP, TIF and TIFF."
+                "CSV, TSV, XLSX, XLS, JSON, JSONL, Parquet, PDF, DOCX, "
+                "PPTX, TXT, Markdown, HTML, JPG, JPEG, PNG, WEBP, BMP, TIF and TIFF."
             ),
         )
 
@@ -1687,8 +1704,23 @@ async def upload_dataset(
     converted_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        max_upload_bytes = 100 * 1024 * 1024
+        total_bytes = 0
         with open(original_path, "wb") as buffer:
-            shutil.copyfileobj(dataset.file, buffer)
+            while True:
+                chunk = dataset.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > max_upload_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="File is larger than the 100 MB upload limit.",
+                    )
+                buffer.write(chunk)
+
+        if total_bytes == 0:
+            raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
         conversion = convert_to_analysis_files(
             original_path=original_path,
@@ -3791,6 +3823,12 @@ def dataset_facts(df):
             },
 
         "numeric_statistics":
+            {},
+        # A bounded sample lets Gemini answer concrete questions about
+        # actual records instead of receiving only aggregate statistics.
+        "sample_rows":
+            safe(df.iloc[:25, :30].to_dict(orient="records")),
+        "top_categorical_values":
             {}
     }
 
@@ -3918,11 +3956,11 @@ def _gemini_generate(contents, config=None):
     if gemini_client is None:
         raise RuntimeError("Gemini client could not be initialized.")
 
-    configured = GEMINI_MODEL or "gemini-3.8-flash-lite"
+    configured = GEMINI_MODEL or "gemini-3.8-flash"
     fallback = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 
     models = []
-    for name in (configured, fallback):
+    for name in (configured, fallback, "gemini-3.5-flash-lite"):
         if name and name not in models:
             models.append(name)
 
@@ -3945,10 +3983,14 @@ def _gemini_generate(contents, config=None):
                     "resource exhausted", "temporarily",
                 )
             )
+            model_error = any(
+                token in message
+                for token in ("404", "not found", "unknown model", "unsupported model", "invalid model")
+            )
 
             # Do not wait through repeated retries: switch to the fallback
             # immediately for transient provider errors.
-            if not transient or index == len(models) - 1:
+            if (not transient and not model_error) or index == len(models) - 1:
                 raise RuntimeError(
                     f"Gemini request failed on model {model_name}: {error}"
                 ) from error

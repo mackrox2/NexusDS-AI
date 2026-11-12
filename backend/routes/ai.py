@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pathlib import Path
 from bson import ObjectId
 import pandas as pd
@@ -6,6 +6,7 @@ import numpy as np
 
 
 from database.mongodb import datasets_collection
+from auth import get_current_user
 
 
 router = APIRouter(
@@ -496,74 +497,17 @@ def get_missing_recommendation(
     "/clean/{dataset_id}"
 )
 def analyze_cleaning(
-    dataset_id: str
+    dataset_id: str,
+    current_user=Depends(get_current_user)
 ):
 
-    # =================================================
-    # VALIDATE ID
-    # =================================================
+    # Resolve the user's own dataset from persistent GridFS storage.
+    # Local Render uploads are only caches and may disappear after a restart.
+    from routes.dataset import get_document, get_analysis_file_path, read_dataset as read_normalized_dataset
 
-    try:
-
-        object_id = ObjectId(
-            dataset_id
-        )
-
-    except Exception:
-
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid dataset ID."
-        )
-
-
-    # =================================================
-    # FIND DATASET
-    # =================================================
-
-    dataset = datasets_collection.find_one(
-        {
-            "_id": object_id
-        }
-    )
-
-    if not dataset:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Dataset not found."
-        )
-
-
-    # =================================================
-    # FIND FILE
-    # =================================================
-
-    file_path = find_dataset_file(
-        dataset
-    )
-
-    if file_path is None:
-
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "Dataset record exists, but the "
-                "actual file was not found inside "
-                "backend/uploads. Please upload "
-                "the dataset again."
-            )
-        )
-
-
-    # =================================================
-    # READ FILE
-    # =================================================
-
-    df = read_dataset(
-        file_path
-    )
-
+    dataset = get_document(dataset_id, current_user)
+    file_path = get_analysis_file_path(dataset)
+    df = read_normalized_dataset(file_path)
 
     # =================================================
     # BASIC INFORMATION

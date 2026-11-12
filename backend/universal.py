@@ -44,8 +44,10 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _PDF_EXTENSIONS = {".pdf"}
-_WORD_EXTENSIONS = {".docx", ".doc"}
-_TABULAR_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+_WORD_EXTENSIONS = {".docx"}
+_PRESENTATION_EXTENSIONS = {".pptx"}
+_TEXT_EXTENSIONS = {".txt", ".md", ".log", ".html", ".htm"}
+_TABULAR_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".json", ".jsonl", ".ndjson", ".parquet"}
 
 MIME_TYPES = {
     ".jpg": "image/jpeg",
@@ -72,6 +74,8 @@ def supported_extension(extension: str) -> bool:
         | _PDF_EXTENSIONS
         | _WORD_EXTENSIONS
         | _IMAGE_EXTENSIONS
+        | _PRESENTATION_EXTENSIONS
+        | _TEXT_EXTENSIONS
     )
 
 
@@ -85,6 +89,10 @@ def file_category(extension: str) -> str:
         return "word"
     if ext in _IMAGE_EXTENSIONS:
         return "image"
+    if ext in _PRESENTATION_EXTENSIONS:
+        return "presentation"
+    if ext in _TEXT_EXTENSIONS:
+        return "text"
     return "unknown"
 
 
@@ -172,17 +180,48 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def read_tabular(file_path: Path) -> pd.DataFrame:
+    """Read common structured formats with encoding and schema fallbacks."""
     ext = file_path.suffix.lower()
 
-    if ext == ".csv":
-        # UTF-8 first, then common Indian/Windows fallback.
-        try:
-            return normalize_dataframe(pd.read_csv(file_path))
-        except UnicodeDecodeError:
-            return normalize_dataframe(pd.read_csv(file_path, encoding="latin1"))
+    if ext in {".csv", ".tsv"}:
+        separator = "\t" if ext == ".tsv" else None
+        last_error = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
+            try:
+                if separator:
+                    options = {"encoding": encoding, "sep": separator, "low_memory": False}
+                else:
+                    options = {"encoding": encoding, "sep": None, "engine": "python"}
+                return normalize_dataframe(pd.read_csv(file_path, **options))
+            except Exception as error:
+                last_error = error
+        raise ValueError(f"Unable to parse delimited file: {last_error}")
 
     if ext in {".xlsx", ".xls"}:
-        return normalize_dataframe(pd.read_excel(file_path))
+        return normalize_dataframe(pd.read_excel(file_path, sheet_name=0))
+
+    if ext in {".json", ".jsonl", ".ndjson"}:
+        if ext in {".jsonl", ".ndjson"}:
+            frame = pd.read_json(file_path, lines=True)
+        else:
+            with open(file_path, "r", encoding="utf-8-sig") as source:
+                payload = json.load(source)
+            if isinstance(payload, list):
+                frame = pd.json_normalize(payload, sep=".")
+            elif isinstance(payload, dict):
+                records = next(
+                    (value for value in payload.values()
+                     if isinstance(value, list) and value
+                     and all(isinstance(item, dict) for item in value)),
+                    None,
+                )
+                frame = pd.json_normalize(records, sep=".") if records is not None else pd.json_normalize(payload, sep=".")
+            else:
+                raise ValueError("JSON must contain an object or an array of records.")
+        return normalize_dataframe(frame)
+
+    if ext == ".parquet":
+        return normalize_dataframe(pd.read_parquet(file_path))
 
     raise ValueError(f"Unsupported tabular extension: {ext}")
 
@@ -273,7 +312,7 @@ def _gemini_generate(contents, config=None):
     fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 
     models = []
-    for model_name in (configured_model, fallback_model, "gemini-3.8-flash-lite"):
+    for model_name in (configured_model, fallback_model, "gemini-3.5-flash-lite"):
         if model_name and model_name not in models:
             models.append(model_name)
 
@@ -290,7 +329,8 @@ def _gemini_generate(contents, config=None):
             except Exception as error:
                 last_error = error
 
-                if not _is_transient_gemini_error(error):
+                model_error = any(token in str(error).lower() for token in ("404", "not found", "unknown model", "unsupported model", "invalid model"))
+                if not _is_transient_gemini_error(error) and not model_error:
                     raise
 
                 if attempt < 2:
@@ -349,7 +389,6 @@ structured information. If extraction is genuinely impossible, return [].
         response = _gemini_generate(
             contents=contents,
             config={
-                "thinking_config": {"thinking_level": "minimal"},
                 "response_mime_type": "application/json",
                 "max_output_tokens": 12000,
                 "temperature": 0.0,
@@ -387,38 +426,43 @@ structured information. If extraction is genuinely impossible, return [].
 
 
 def _extract_pdf(file_path: Path) -> pd.DataFrame:
-    # Gemini can process both native and scanned PDFs. This keeps the same
-    # extraction path for text PDFs, scanned PDFs and mixed PDFs.
-    rows = _gemini_json_from_file(
-        file_path,
-        """
-Extract every meaningful table from this PDF. Preserve table headers,
-row/column relationships, page-spanning tables and repeated headers.
-Do not merge unrelated tables unless their columns clearly represent the
-same schema.
-""",
-    )
-
-    if rows:
-        return normalize_dataframe(pd.DataFrame(rows))
-
-    # Text-only fallback for PDFs where a local parser is available.
+    """Prefer native PDF text; use Gemini for structured/scanned extraction."""
+    extracted_text = ""
     try:
         from pypdf import PdfReader
-
         reader = PdfReader(str(file_path))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages)
-
-        if text.strip():
-            return normalize_dataframe(
-                pd.DataFrame(
-                    [{"Extracted_Text": line.strip()} for line in text.splitlines() if line.strip()]
-                )
-            )
+        extracted_text = "\n".join((page.extract_text() or "") for page in reader.pages)
     except Exception:
-        pass
+        extracted_text = ""
 
-    return pd.DataFrame()
+    if _client is not None:
+        try:
+            rows = _gemini_json_from_file(
+                file_path,
+                "Extract meaningful tables from this PDF. Preserve headers and row relationships. Never invent values.",
+            )
+            if rows:
+                return normalize_dataframe(pd.DataFrame(rows))
+        except Exception as error:
+            print("PDF GEMINI EXTRACTION WARNING:", repr(error))
+
+    if extracted_text.strip():
+        lines = [line.strip() for line in extracted_text.splitlines() if line.strip()]
+        try:
+            frame = pd.read_csv(io.StringIO("\n".join(lines)), sep=None, engine="python")
+            if frame.shape[1] > 1:
+                return normalize_dataframe(frame)
+        except Exception:
+            pass
+        return normalize_dataframe(pd.DataFrame({"Extracted_Text": lines}))
+
+    if _client is None:
+        raise RuntimeError("This PDF appears scanned or image-only. Set GEMINI_API_KEY to enable OCR extraction.")
+    rows = _gemini_json_from_file(
+        file_path,
+        "Extract readable tables and structured information from this scanned PDF. Do not guess unclear values.",
+    )
+    return normalize_dataframe(pd.DataFrame(rows))
 
 
 def _extract_image(file_path: Path) -> pd.DataFrame:
@@ -490,12 +534,79 @@ def _extract_word(file_path: Path) -> pd.DataFrame:
         ) from error
 
 
+def _extract_text_file(file_path: Path) -> pd.DataFrame:
+    ext = file_path.suffix.lower()
+    if ext in {".html", ".htm"}:
+        try:
+            tables = pd.read_html(file_path)
+            if tables:
+                return normalize_dataframe(pd.concat(tables, ignore_index=True, sort=False))
+        except ValueError:
+            pass
+        except Exception as error:
+            raise ValueError(f"Unable to parse HTML: {error}") from error
+        try:
+            from bs4 import BeautifulSoup
+            html = file_path.read_text(encoding="utf-8", errors="replace")
+            text = BeautifulSoup(html, "html.parser").get_text("\n", strip=True)
+        except Exception as error:
+            raise ValueError(f"Unable to extract HTML text: {error}") from error
+    else:
+        text = file_path.read_text(encoding="utf-8-sig", errors="replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("The text document is empty.")
+    if any(delimiter in text for delimiter in (",", "\t", ";", "|")):
+        try:
+            frame = pd.read_csv(io.StringIO("\n".join(lines)), sep=None, engine="python")
+            if frame.shape[1] > 1:
+                return normalize_dataframe(frame)
+        except Exception:
+            pass
+    return normalize_dataframe(pd.DataFrame({"Content": lines}))
+
+
+def _extract_presentation(file_path: Path) -> pd.DataFrame:
+    try:
+        from pptx import Presentation
+    except ImportError as error:
+        raise RuntimeError("PPTX support requires python-pptx. Install backend requirements.") from error
+    presentation = Presentation(str(file_path))
+    records = []
+    for slide_number, slide in enumerate(presentation.slides, start=1):
+        for shape in slide.shapes:
+            if getattr(shape, "has_table", False):
+                table = shape.table
+                if len(table.rows) > 1:
+                    headers = [cell.text.strip() or f"Column_{i + 1}" for i, cell in enumerate(table.rows[0].cells)]
+                    for row in table.rows[1:]:
+                        records.append({"Slide": slide_number, **{
+                            headers[i]: row.cells[i].text.strip()
+                            for i in range(min(len(headers), len(row.cells)))
+                        }})
+                else:
+                    records.append({"Slide": slide_number, "Content": " | ".join(cell.text.strip() for cell in table.rows[0].cells)})
+            elif getattr(shape, "has_text_frame", False):
+                value = shape.text.strip()
+                if value:
+                    records.append({"Slide": slide_number, "Content": value})
+    if not records:
+        raise ValueError("No readable text or tables were found in this PowerPoint.")
+    return normalize_dataframe(pd.DataFrame(records))
+
+
 def extract_dataframe(file_path: Path) -> tuple[pd.DataFrame, str]:
     ext = file_path.suffix.lower()
     category = file_category(ext)
 
     if category == "tabular":
         return read_tabular(file_path), "native"
+
+    if category == "text":
+        return _extract_text_file(file_path), "text-extraction"
+
+    if category == "presentation":
+        return _extract_presentation(file_path), "presentation-extraction"
 
     if category == "image":
         return _extract_image(file_path), "ocr"

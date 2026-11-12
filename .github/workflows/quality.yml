@@ -1,0 +1,40 @@
+name: Project quality checks
+
+on:
+  push:
+    branches: [main, feature/universal-data-workflows]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt pytest
+      - name: Compile backend Python files
+        run: python -m compileall -q backend
+      - name: Test universal file ingestion
+        run: pytest -q backend/tests
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: client
+      - name: Build frontend
+        run: npm run build
+        working-directory: client
