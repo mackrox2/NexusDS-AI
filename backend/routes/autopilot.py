@@ -105,127 +105,21 @@ def get_document(dataset_id, current_user=None):
 
 
 def read_file(doc):
+          """Read the normalized dataset from persistent GridFS storage."""
+          from routes.dataset import get_analysis_file_path, read_dataset
 
-          # Universal uploads preserve the original source in storedName and create
-
-          # an analysis-ready XLSX in analysisStoredName. Autopilot must analyze
-
-          # the generated XLSX for PDF/DOCX/images instead of the original file.
-
-          stored = doc.get("analysisStoredName") or doc.get("storedName")
-
-
-          if not stored:
-
-                    raise HTTPException(
-
-                              status_code=404,
-
-                              detail="Dataset analysis/storage name is missing."
-
-                    )
-
-
-          path = (UPLOAD_DIR / Path(stored).name).resolve()
-
-          root = UPLOAD_DIR.resolve()
-
-
-          if root not in path.parents or not path.exists():
-
-                    raise HTTPException(
-
-                              status_code=404,
-
-                              detail="Dataset analysis file was not found. Please upload the dataset again."
-
-                    )
-
-
-          ext = path.suffix.lower()
-
+          path = get_analysis_file_path(doc)
           try:
-
-                    if ext == ".csv":
-
-                              df = pd.read_csv(path)
-
-                    elif ext in (".xlsx", ".xls"):
-
-                              preview = pd.read_excel(path, header=None, nrows=15)
-
-                              if preview.empty:
-
-                                        raise HTTPException(status_code=400, detail="Excel file is empty.")
-
-
-                              keywords = [
-
-                                        "s.no", "sr.no", "date", "city", "name", "id", "total",
-
-                                        "amount", "value", "status", "approved", "approval",
-
-                                        "pending", "cancel", "customer", "product", "price",
-
-                                        "sales", "profit", "target", "category", "availability"
-
-                              ]
-
-                              best_row, best_score = 0, -1
-
-                              for i in range(len(preview)):
-
-                                        values = []
-
-                                        keyword_score = 0
-
-                                        for v in preview.iloc[i]:
-
-                                                  if pd.isna(v):
-
-                                                            continue
-
-                                                  text = normalize(v)
-
-                                                  if not text or text.lower().startswith("unnamed"):
-
-                                                            continue
-
-                                                  values.append(text)
-
-                                                  if any(k in text.lower() for k in keywords):
-
-                                                            keyword_score += 2
-
-                                        score = len(values) + len(set(x.lower() for x in values)) * 0.25 + keyword_score
-
-                                        if score > best_score:
-
-                                                  best_row, best_score = i, score
-
-                              df = pd.read_excel(path, header=best_row)
-
-                    else:
-
-                              raise HTTPException(status_code=400, detail="Only CSV and Excel files are supported.")
-
+                    df = read_dataset(path)
           except HTTPException:
-
                     raise
-
           except Exception as exc:
-
-                    raise HTTPException(status_code=400, detail=f"Unable to read dataset: {exc}")
-
-
-          df.columns = [normalize(c) for c in df.columns]
-
-          df = df.dropna(axis=0, how="all").dropna(axis=1, how="all")
-
-          df = df[[c for c in df.columns if c and not str(c).lower().startswith("unnamed")]]
+                    raise HTTPException(
+                              status_code=400,
+                              detail=f"Unable to read dataset: {exc}"
+                    ) from exc
 
           if df.empty or df.shape[1] == 0:
-
                     raise HTTPException(status_code=400, detail="Dataset contains no usable data.")
 
           return df
