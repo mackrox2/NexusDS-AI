@@ -1041,7 +1041,7 @@ function Dataset() {
             <input
               id="dataset-upload"
               type="file"
-              accept=".csv,.xlsx,.xls,.pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff"
+              accept=".csv,.tsv,.xlsx,.xls,.json,.jsonl,.ndjson,.parquet,.pdf,.docx,.pptx,.txt,.md,.log,.html,.htm,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff"
               onChange={handleFileChange}
               className="hidden"
             />
