@@ -3,6 +3,7 @@ from pathlib import Path
 from bson import ObjectId
 import pandas as pd
 import numpy as np
+import json
 
 
 from database.mongodb import datasets_collection
@@ -118,10 +119,42 @@ def find_dataset_file(dataset):
 # SAFE VALUE
 # =====================================================
 
+def _stable_cell_value(value):
+    """Convert nested/unhashable spreadsheet cells into stable hashable values."""
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, (bool, np.bool_)) and missing:
+            return None
+    except Exception:
+        pass
+
+    if isinstance(value, (dict, list, tuple, set)):
+        try:
+            return json.dumps(value, sort_keys=True, default=str, ensure_ascii=False)
+        except Exception:
+            return repr(value)
+    return value
+
+
+def _safe_unique_count(series):
+    """Count unique values even when a workbook contains nested cell values."""
+    try:
+        return int(series.nunique(dropna=True))
+    except (TypeError, ValueError):
+        return int(series.map(_stable_cell_value).nunique(dropna=True))
+
+
 def safe_value(value):
 
-    if pd.isna(value):
-        return None
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, (bool, np.bool_)) and missing:
+            return None
+    except Exception:
+        pass
+
+    if isinstance(value, (dict, list, tuple, set)):
+        return str(value)
 
     if isinstance(
         value,
@@ -209,11 +242,7 @@ def detect_column_type(series):
     # Categorical / text
     # -------------------------------------------------
 
-    unique_count = (
-        series.nunique(
-            dropna=True
-        )
-    )
+    unique_count = _safe_unique_count(series)
 
     total_count = len(
         series.dropna()
@@ -565,9 +594,12 @@ def analyze_cleaning(
     # DUPLICATES
     # =================================================
 
-    duplicate_rows = int(
-        df.duplicated().sum()
-    )
+    try:
+        duplicate_rows = int(df.duplicated().sum())
+    except (TypeError, ValueError):
+        # Excel cells may contain nested objects that pandas cannot hash.
+        comparable = df.apply(lambda column: column.map(_stable_cell_value))
+        duplicate_rows = int(comparable.duplicated().sum())
 
 
     # =================================================
@@ -601,11 +633,7 @@ def analyze_cleaning(
             )
         )
 
-        unique_values = int(
-            series.nunique(
-                dropna=True
-            )
-        )
+        unique_values = _safe_unique_count(series)
 
         missing_count = int(
             series.isna().sum()
@@ -827,11 +855,7 @@ def analyze_cleaning(
 
     for column in df.columns:
 
-        unique_count = int(
-            df[column].nunique(
-                dropna=True
-            )
-        )
+        unique_count = _safe_unique_count(df[column])
 
         if unique_count <= 1:
 
