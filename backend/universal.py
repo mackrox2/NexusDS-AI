@@ -184,7 +184,7 @@ def read_tabular(file_path: Path) -> pd.DataFrame:
     ext = file_path.suffix.lower()
 
     if ext in {".csv", ".tsv"}:
-        separator = "\\t" if ext == ".tsv" else None
+        separator = "\t" if ext == ".tsv" else None
         last_error = None
         for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
             try:
