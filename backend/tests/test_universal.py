@@ -3,6 +3,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import pandas as pd
 from pptx import Presentation
 
 from universal import extract_dataframe, read_tabular
@@ -65,3 +66,13 @@ def test_powerpoint_text_ingestion(tmp_path: Path):
     frame, method = extract_dataframe(file_path)
     assert method == "presentation-extraction"
     assert "Quarterly sales" in frame["Content"].tolist()
+
+def test_excel_and_parquet_ingestion(tmp_path: Path):
+    original = pd.DataFrame({"name": ["Asha", "Ravi"], "score": [91, 84]})
+    excel_file = tmp_path / "sample.xlsx"
+    original.to_excel(excel_file, index=False)
+    assert len(read_tabular(excel_file)) == 2
+
+    parquet_file = tmp_path / "sample.parquet"
+    original.to_parquet(parquet_file, index=False)
+    assert len(read_tabular(parquet_file)) == 2
