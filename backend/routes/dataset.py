@@ -1180,13 +1180,6 @@ def build_recommendations(df):
     # Outliers.
     for column in df.columns:
 
-        if not pd.api.types.is_numeric_dtype(df[column]) and not pd.api.types.is_datetime64_any_dtype(df[column]):
-            counts = df[column].dropna().astype(str).value_counts().head(10)
-            if not counts.empty:
-                facts["top_categorical_values"][str(column)] = {
-                    str(value): int(count) for value, count in counts.items()
-                }
-
         if (
             column_kind(
                 df[column]
